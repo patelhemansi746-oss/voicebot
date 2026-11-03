@@ -24,6 +24,8 @@ export class TransitionTable {
     this.addRule(WorkflowState.INITIALIZING, WorkflowState.OBSERVING, WorkflowEvent.OBSERVE, 'Capture visual/app context');
     this.addRule(WorkflowState.INITIALIZING, WorkflowState.REASONING, WorkflowEvent.REASON, 'Direct reasoning on voice query');
     this.addRule(WorkflowState.INITIALIZING, WorkflowState.PLANNING, WorkflowEvent.PLAN, 'Decompose multi-step task');
+    this.addRule(WorkflowState.INITIALIZING, WorkflowState.EXECUTING_TOOL, WorkflowEvent.EXECUTE_TOOL, 'Direct tool execution from initialization');
+    this.addRule(WorkflowState.INITIALIZING, WorkflowState.AWAITING_APPROVAL, WorkflowEvent.REQUIRE_APPROVAL, 'Initial tool step requires approval');
     this.addRule(WorkflowState.INITIALIZING, WorkflowState.FAILED, WorkflowEvent.FAIL, 'Initialization error');
 
     // From OBSERVING (Context gathering: screen, OCR, active window)
@@ -57,6 +59,10 @@ export class TransitionTable {
     // From EXECUTING_TOOL (Mock / real tool invocation)
     this.addRule(WorkflowState.EXECUTING_TOOL, WorkflowState.VERIFYING, WorkflowEvent.TOOL_SUCCESS, 'Tool executed successfully');
     this.addRule(WorkflowState.EXECUTING_TOOL, WorkflowState.VERIFYING, WorkflowEvent.VERIFY, 'Verify tool result');
+    this.addRule(WorkflowState.EXECUTING_TOOL, WorkflowState.EXECUTING_TOOL, WorkflowEvent.EXECUTE_TOOL, 'Direct transition between tool executions');
+    this.addRule(WorkflowState.EXECUTING_TOOL, WorkflowState.AWAITING_APPROVAL, WorkflowEvent.REQUIRE_APPROVAL, 'Subsequent tool execution requires approval');
+    this.addRule(WorkflowState.EXECUTING_TOOL, WorkflowState.RESPONDING, WorkflowEvent.RESPOND, 'Move to responding after tools');
+    this.addRule(WorkflowState.EXECUTING_TOOL, WorkflowState.COMPLETED, WorkflowEvent.COMPLETE, 'Workflow completed after tools');
     this.addRule(WorkflowState.EXECUTING_TOOL, WorkflowState.RECOVERING, WorkflowEvent.TOOL_FAILURE, 'Tool execution error, entering recovery');
     this.addRule(WorkflowState.EXECUTING_TOOL, WorkflowState.RECOVERING, WorkflowEvent.RECOVER, 'Direct trigger of recovery');
     this.addRule(WorkflowState.EXECUTING_TOOL, WorkflowState.FAILED, WorkflowEvent.FAIL, 'Unrecoverable tool failure');

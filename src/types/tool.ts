@@ -28,6 +28,8 @@ export interface ToolSpec {
   parameters: ToolParameterSchema;
   riskLevel: RiskLevel;
   requiredPermission?: string;
+  requiredScopes?: string[];
+  isIdempotent?: boolean;
   timeoutMs?: number;
   failureBehavior: 'RETRY' | 'ABORT' | 'FALLBACK';
 }
@@ -46,6 +48,8 @@ export interface ToolExecutionRequest {
   riskLevel: RiskLevel;
   approvalToken?: string;
   timeoutMs?: number;
+  grantedScopes?: string[];
+  signal?: AbortSignal;
 }
 
 export interface ToolExecutionResult<T = unknown> {
