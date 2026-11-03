@@ -37,3 +37,4 @@ export interface ValidationOptions {
   /** Detect cycles in transition graphs in addition to dependency graphs */
   detectTransitionCycles?: boolean;
 }
+
