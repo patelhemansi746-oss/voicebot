@@ -1,0 +1,35 @@
+{
+  "name": "voicebot-agentic-workflow",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Agentic Workflow Orchestrator, State Machine & Mock Tool Executor for Academia AI Voice Co-Pilot",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "dev": "tsx src/demo/server.ts",
+    "start": "tsx src/demo/server.ts",
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "demo": "tsx src/demo/cli-demo.ts",
+    "demo:week2": "tsx src/demo/week2-demo.ts",
+    "demo:ui": "tsx src/demo/server.ts"
+  },
+  "keywords": [
+    "agentic-workflow",
+    "state-machine",
+    "orchestrator",
+    "mock-tool-executor",
+    "voice-copilot"
+  ],
+  "author": "SDE-8 Voicebot Team",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^2.1.8",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Academia AI Voice Co-Pilot - Agentic Workflow Visualizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #0a0e17;
+      --bg-secondary: #121826;
+      --bg-card: rgba(18, 24, 38, 0.7);
+      --border-color: rgba(255, 255, 255, 0.08);
+      --border-glow: rgba(56, 189, 248, 0.3);
+      --accent-cyan: #38bdf8;
+      --accent-purple: #818cf8;
+      --accent-emerald: #34d399;
+      --accent-amber: #fbbf24;
+      --accent-rose: #f43f5e;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: radial-gradient(circle at 50% 0%, #172554 0%, var(--bg-primary) 65%);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 1.25rem 2rem;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(10, 14, 23, 0.8);
+      backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .brand-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      color: #000;
+    }
+
+    .brand h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand span {
+      font-size: 0.75rem;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent-cyan);
+      padding: 0.2rem 0.6rem;
+      border-radius: 9999px;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+
+    .connection-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.8rem;
+      color: var(--accent-emerald);
+      background: rgba(52, 211, 153, 0.1);
+      padding: 0.35rem 0.85rem;
+      border-radius: 9999px;
+      border: 1px solid rgba(52, 211, 153, 0.25);
+    }
+
+    .connection-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-emerald);
+      box-shadow: 0 0 8px var(--accent-emerald);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    main {
+      flex: 1;
+      padding: 2rem;
+      max-width: 1440px;
+      margin: 0 auto;
+      width: 100%;
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 1.5rem;
+    }
+
+    .card {
+      background: var(--bg-card);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 1.25rem;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .card-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .action-btn {
+      width: 100%;
+      padding: 0.85rem 1rem;
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text-main);
+      font-size: 0.88rem;
+      font-weight: 500;
+      text-align: left;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      transition: all 0.2s ease;
+      margin-bottom: 0.75rem;
+    }
+
+    .action-btn:hover {
+      background: rgba(56, 189, 248, 0.1);
+      border-color: var(--accent-cyan);
+      transform: translateY(-1px);
+    }
+
+    .action-btn .btn-badge {
+      font-size: 0.7rem;
+      color: var(--accent-cyan);
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+
+    .action-btn .btn-desc {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .state-nodes-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .state-node {
+      padding: 0.75rem 0.5rem;
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+      background: rgba(255, 255, 255, 0.02);
+      text-align: center;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      transition: all 0.3s ease;
+    }
+
+    .state-node.active {
+      border-color: var(--accent-cyan);
+      background: rgba(56, 189, 248, 0.15);
+      color: #fff;
+      box-shadow: 0 0 16px rgba(56, 189, 248, 0.4);
+      transform: scale(1.05);
+    }
+
+    .state-node.completed {
+      border-color: var(--accent-emerald);
+      color: var(--accent-emerald);
+      background: rgba(52, 211, 153, 0.08);
+    }
+
+    .terminal-container {
+      background: #080c14;
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      height: 380px;
+      overflow-y: auto;
+      padding: 1rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      line-height: 1.6;
+    }
+
+    .log-line {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 0.35rem;
+    }
+
+    .log-time { color: var(--text-muted); font-size: 0.72rem; }
+    .log-event { font-weight: 600; }
+    .log-event.transition { color: var(--accent-purple); }
+    .log-event.step { color: var(--accent-cyan); }
+    .log-event.safety { color: var(--accent-amber); }
+    .log-event.retry { color: var(--accent-rose); }
+    .log-event.complete { color: var(--accent-emerald); }
+
+    /* Modal */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(8px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+
+    .modal-backdrop.open { display: flex; }
+
+    .modal {
+      background: #141b2d;
+      border: 1px solid var(--accent-amber);
+      border-radius: 14px;
+      width: 90%;
+      max-width: 520px;
+      padding: 1.75rem;
+      box-shadow: 0 0 32px rgba(251, 191, 36, 0.25);
+      animation: popIn 0.25s ease-out;
+    }
+
+    @keyframes popIn {
+      from { transform: scale(0.95); opacity: 0; }
+      to { transform: scale(1); opacity: 1; }
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+
+    .modal-header h2 {
+      font-size: 1.1rem;
+      color: var(--accent-amber);
+    }
+
+    .modal-body {
+      font-size: 0.85rem;
+      color: var(--text-main);
+      margin-bottom: 1.5rem;
+      line-height: 1.5;
+    }
+
+    .modal-param-box {
+      background: rgba(0, 0, 0, 0.3);
+      padding: 0.75rem;
+      border-radius: 8px;
+      margin-top: 0.75rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.78rem;
+      color: var(--accent-cyan);
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+    }
+
+    .btn-deny {
+      padding: 0.65rem 1.25rem;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-weight: 500;
+    }
+
+    .btn-approve {
+      padding: 0.65rem 1.25rem;
+      border-radius: 8px;
+      border: none;
+      background: var(--accent-amber);
+      color: #000;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 0 12px rgba(251, 191, 36, 0.35);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-icon">AG</div>
+      <div>
+        <h1>Academia AI Voice Co-Pilot</h1>
+        <p style="font-size: 0.75rem; color: var(--text-muted);">SDE-8 Agentic Workflow & Orchestration Engine</p>
+      </div>
+      <span>v1.0.0</span>
+    </div>
+    <div class="connection-badge">
+      <div class="connection-dot"></div>
+      <span id="conn-status">SSE Connected</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Left Column: Controls & Scenarios -->
+    <div>
+      <div class="card" style="margin-bottom: 1.25rem;">
+        <div class="card-header">
+          <div class="card-title">🚀 Launch Scenarios</div>
+        </div>
+
+        <button class="action-btn" onclick="triggerWorkflow('pdf_summarize')">
+          <span class="btn-badge">MULTI-STEP REASONING</span>
+          <strong>Calculation & Summarization</strong>
+          <span class="btn-desc">Compute metrics (calculator) -> Synthesize summary (summarize_text)</span>
+        </button>
+
+        <button class="action-btn" onclick="triggerWorkflow('file_cleanup')">
+          <span class="btn-badge" style="color: var(--accent-amber);">SAFETY GATE APPROVAL</span>
+          <strong>Controlled High-Risk Action (Level D)</strong>
+          <span class="btn-desc">Pauses state machine & requires explicit human sign-off</span>
+        </button>
+
+        <button class="action-btn" onclick="triggerWorkflow('retry_demo')">
+          <span class="btn-badge" style="color: var(--accent-rose);">FAULT TOLERANCE</span>
+          <strong>Exponential Backoff Retries</strong>
+          <span class="btn-desc">Recovers from consecutive transient execution failures</span>
+        </button>
+
+        <button class="action-btn" onclick="triggerWorkflow('code_diag')">
+          <span class="btn-badge">TEXT ANALYSIS</span>
+          <strong>Diagnostic Text Summarization</strong>
+          <span class="btn-desc">Ingest diagnostic input -> Root cause summary & recommendations</span>
+        </button>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🛡️ Safety Gate Policy</div>
+        </div>
+        <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.8;">
+          <div>• <strong>Level A (Info):</strong> <span style="color: var(--accent-emerald);">Auto-Approved</span></div>
+          <div>• <strong>Level B (Low-Risk):</strong> <span style="color: var(--accent-emerald);">Auto-Approved</span></div>
+          <div>• <strong>Level C (Sensitive):</strong> <span style="color: var(--accent-amber);">User Confirmation</span></div>
+          <div>• <strong>Level D (Destructive):</strong> <span style="color: var(--accent-rose);">Explicit Double Confirmation</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column: State Machine & Live Stream -->
+    <div>
+      <div class="card" style="margin-bottom: 1.25rem;">
+        <div class="card-header">
+          <div class="card-title">🔄 Agentic State Machine Lifecycle</div>
+          <span id="current-state-badge" style="font-size: 0.75rem; color: var(--accent-cyan); font-weight: 600;">STATE: IDLE</span>
+        </div>
+
+        <div class="state-nodes-grid" id="states-grid">
+          <div class="state-node active" id="node-IDLE">IDLE</div>
+          <div class="state-node" id="node-OBSERVING">OBSERVING</div>
+          <div class="state-node" id="node-REASONING">REASONING</div>
+          <div class="state-node" id="node-PLANNING">PLANNING</div>
+          <div class="state-node" id="node-AWAITING_APPROVAL">APPROVAL</div>
+          <div class="state-node" id="node-EXECUTING_TOOL">TOOL EXEC</div>
+          <div class="state-node" id="node-VERIFYING">VERIFYING</div>
+          <div class="state-node" id="node-RESPONDING">RESPONDING</div>
+          <div class="state-node" id="node-COMPLETED">COMPLETED</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📟 Live Execution Stream</div>
+          <button onclick="clearTerminal()" style="background: transparent; border: none; color: var(--text-muted); font-size: 0.75rem; cursor: pointer;">Clear</button>
+        </div>
+        <div class="terminal-container" id="terminal">
+          <div class="log-line">
+            <span class="log-time">00:00:00</span>
+            <span class="log-event step">[SYSTEM]</span>
+            <span>Agentic Orchestrator initialized and listening for events...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Safety Gate Approval Modal -->
+  <div class="modal-backdrop" id="approval-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <span style="font-size: 1.5rem;">⚠️</span>
+        <div>
+          <h2>Human-in-the-Loop Safety Gate</h2>
+          <p id="modal-risk-badge" style="font-size: 0.75rem; color: var(--accent-rose); font-weight: 600;">RISK LEVEL: D_HIGH_RISK_DESTRUCTIVE</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <p id="modal-desc">The AI Agent is requesting authorization to perform a sensitive or destructive operation.</p>
+        <div class="modal-param-box" id="modal-params">{}</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-deny" onclick="resolveApproval(false)">Deny Action</button>
+        <button class="btn-approve" onclick="resolveApproval(true)">Authorize & Execute</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let activePendingApproval = null;
+
+    function logTerminal(type, eventText, details) {
+      const term = document.getElementById('terminal');
+      const row = document.createElement('div');
+      row.className = 'log-line';
+      const now = new Date().toLocaleTimeString();
+      row.innerHTML = `
+        <span class="log-time">${now}</span>
+        <span class="log-event ${type}">[${eventText}]</span>
+        <span>${details}</span>
+      `;
+      term.appendChild(row);
+      term.scrollTop = term.scrollHeight;
+    }
+
+    function clearTerminal() {
+      document.getElementById('terminal').innerHTML = '';
+    }
+
+    function setActiveState(state) {
+      document.getElementById('current-state-badge').innerText = `STATE: ${state}`;
+      const nodes = document.querySelectorAll('.state-node');
+      nodes.forEach(n => n.classList.remove('active'));
+      const activeNode = document.getElementById(`node-${state}`);
+      if (activeNode) {
+        activeNode.classList.add('active');
+      }
+    }
+
+    // Connect to Server-Sent Events
+    const evtSource = new EventSource('/api/events');
+
+    evtSource.addEventListener('transition', (e) => {
+      const data = JSON.parse(e.data);
+      setActiveState(data.to);
+      logTerminal('transition', 'STATE TRANSITION', `${data.from} ──(${data.event})──▶ <strong>${data.to}</strong>`);
+    });
+
+    evtSource.addEventListener('stepStarted', (e) => {
+      const data = JSON.parse(e.data);
+      logTerminal('step', 'STEP STARTED', `Starting '${data.stepName}' [${data.stepType}]`);
+    });
+
+    evtSource.addEventListener('stepFinished', (e) => {
+      const data = JSON.parse(e.data);
+      logTerminal('step', 'STEP FINISHED', `Completed '${data.stepName}'`);
+    });
+
+    evtSource.addEventListener('approvalRequested', (e) => {
+      const data = JSON.parse(e.data);
+      activePendingApproval = data;
+      document.getElementById('modal-risk-badge').innerText = `RISK LEVEL: ${data.riskLevel}`;
+      document.getElementById('modal-desc').innerText = data.consequencesSummary;
+      document.getElementById('modal-params').innerText = JSON.stringify(data.parameters, null, 2);
+      document.getElementById('approval-modal').classList.add('open');
+      logTerminal('safety', 'SAFETY GATE', `Awaiting user confirmation for tool '${data.toolName}'`);
+    });
+
+    evtSource.addEventListener('retryAttempt', (e) => {
+      const data = JSON.parse(e.data);
+      logTerminal('retry', 'RETRY BACKOFF', `Step '${data.stepId}' failed. Backoff ${data.delayMs}ms (Attempt ${data.attempt}/${data.maxAttempts})`);
+    });
+
+    evtSource.addEventListener('workflowCompleted', (e) => {
+      const data = JSON.parse(e.data);
+      logTerminal('complete', 'WORKFLOW DONE', `Workflow ${data.success ? 'succeeded' : 'failed'} in ${data.durationMs}ms`);
+    });
+
+    async function triggerWorkflow(type) {
+      logTerminal('step', 'TRIGGER', `Requesting workflow '${type}'...`);
+      await fetch('/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type })
+      });
+    }
+
+    async function resolveApproval(approved) {
+      document.getElementById('approval-modal').classList.remove('open');
+      if (!activePendingApproval) return;
+
+      logTerminal('safety', 'APPROVAL SUBMITTED', `User decision: ${approved ? 'APPROVED' : 'REJECTED'}`);
+      await fetch('/api/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stepId: activePendingApproval.stepId,
+          approved,
+          reason: approved ? 'Authorized via Web UI' : 'Rejected by user in Web UI'
+        })
+      });
+      activePendingApproval = null;
+    }
+  </script>
+</body>
+</html>
