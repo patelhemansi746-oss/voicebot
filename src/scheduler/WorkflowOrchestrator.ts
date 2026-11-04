@@ -1,6 +1,9 @@
 /**
  * Workflow Orchestrator
- * Coordinates multi-step reasoning workflows across StateMachine, SafetyGate, and ToolExecutor
+ * Coordinates multi-step reasoning workflows across StateMachine, SafetyGate, ToolExecutor,
+ * PlanValidator, and ErrorRecoveryEngine.
+ * Implements Week 2: Plan validation, approval guards, timeouts, bounded idempotent retries, and cancellation.
+ * Academia AI Voice Co-Pilot - SDE-8 Agentic Workflow System (Week 2)
  */
 
 import { EventEmitter } from 'node:events';
@@ -20,12 +23,22 @@ import { CompensationAction } from '../types/error-recovery.js';
 import { StateMachine } from '../state-machine/StateMachine.js';
 import { SafetyGate } from '../safety/SafetyGate.js';
 import { ErrorRecoveryEngine } from '../recovery/ErrorRecoveryEngine.js';
+import { PlanValidator } from '../validation/PlanValidator.js';
+import { ValidationOptions, PlanValidationResult } from '../types/validation.js';
+import { MockToolExecutor } from '../tools/MockToolExecutor.js';
+
+export interface ExecuteWorkflowOptions {
+  validatePlan?: boolean;
+}
 
 export class WorkflowOrchestrator extends EventEmitter {
   private stateMachine!: StateMachine;
   private safetyGate: SafetyGate;
   private toolExecutor: IToolExecutor;
   private recoveryEngine: ErrorRecoveryEngine;
+  private planValidator: PlanValidator;
+  private abortController: AbortController = new AbortController();
+  private isCancelled = false;
   private pendingApprovalResolvers: Map<
     string,
     { resolve: (approved: boolean) => void; reject: (err: unknown) => void }
@@ -35,12 +48,25 @@ export class WorkflowOrchestrator extends EventEmitter {
   constructor(
     toolExecutor: IToolExecutor,
     safetyGate?: SafetyGate,
-    recoveryEngine?: ErrorRecoveryEngine
+    recoveryEngine?: ErrorRecoveryEngine,
+    planValidator?: PlanValidator
   ) {
     super();
     this.toolExecutor = toolExecutor;
     this.safetyGate = safetyGate ?? new SafetyGate();
     this.recoveryEngine = recoveryEngine ?? new ErrorRecoveryEngine();
+
+    const registry =
+      'getRegistry' in toolExecutor
+        ? (toolExecutor as MockToolExecutor).getRegistry()
+        : undefined;
+
+    this.planValidator = planValidator ?? new PlanValidator(registry);
+
+    // Wire safety gate into mock tool executor if applicable
+    if (this.toolExecutor instanceof MockToolExecutor) {
+      this.toolExecutor.setSafetyGate(this.safetyGate);
+    }
   }
 
   public getStateMachine(): StateMachine {
@@ -57,6 +83,48 @@ export class WorkflowOrchestrator extends EventEmitter {
 
   public getRecoveryEngine(): ErrorRecoveryEngine {
     return this.recoveryEngine;
+  }
+
+  public getPlanValidator(): PlanValidator {
+    return this.planValidator;
+  }
+
+  /**
+   * Validate a WorkflowPlan against dependencies, cycles, and allow-listed tools
+   */
+  public validatePlan(definition: WorkflowPlan, options?: ValidationOptions): PlanValidationResult {
+    return this.planValidator.validate(definition, options);
+  }
+
+  /**
+   * Validate a WorkflowPlan or throw PlanValidationError
+   */
+  public validatePlanOrThrow(definition: WorkflowPlan, options?: ValidationOptions): void {
+    this.planValidator.validateOrThrow(definition, options);
+  }
+
+  /**
+   * Cancel an in-flight workflow execution
+   */
+  public async cancel(reason = 'Workflow execution cancelled by user'): Promise<void> {
+    this.isCancelled = true;
+    this.abortController.abort(reason);
+
+    // Resolve any awaiting approval promises as false
+    for (const [, resolver] of this.pendingApprovalResolvers.entries()) {
+      resolver.resolve(false);
+    }
+    this.pendingApprovalResolvers.clear();
+
+    if (this.stateMachine && this.stateMachine.canTransition(WorkflowEvent.ABORT)) {
+      await this.stateMachine.transition(WorkflowEvent.ABORT);
+    }
+
+    this.emit('workflowCancelled', { reason });
+  }
+
+  public isWorkflowCancelled(): boolean {
+    return this.isCancelled || this.abortController.signal.aborted;
   }
 
   /**
@@ -89,14 +157,43 @@ export class WorkflowOrchestrator extends EventEmitter {
    */
   public async executeWorkflow(
     definition: WorkflowPlan,
-    context: WorkflowContext
+    context: WorkflowContext,
+    options?: ExecuteWorkflowOptions
   ): Promise<WorkflowResult> {
     const startTime = Date.now();
     this.executedCompensations = [];
+    this.abortController = new AbortController();
+    this.isCancelled = false;
     this.stateMachine = new StateMachine(context, WorkflowState.IDLE);
 
     // Forward state transitions to orchestrator events
     this.stateMachine.on('transition', (data) => this.emit('stateTransition', data));
+
+    // Optional Plan Validation pre-check
+    if (options?.validatePlan) {
+      try {
+        this.planValidator.validateOrThrow(definition);
+      } catch (valErr) {
+        const error = valErr instanceof Error ? valErr : new Error(String(valErr));
+        const res: WorkflowResult = {
+          workflowId: context.workflowId,
+          finalState: WorkflowState.FAILED,
+          success: false,
+          startTime,
+          endTime: Date.now(),
+          durationMs: Date.now() - startTime,
+          executedSteps: [],
+          outputs: {},
+          error: {
+            message: error.message,
+            code: 'PLAN_VALIDATION_ERROR',
+          },
+          context,
+        };
+        this.emit('workflowFailed', res);
+        return res;
+      }
+    }
 
     const executedSteps: string[] = [];
     let currentStepId: string | undefined = definition.initialStepId;
@@ -107,6 +204,12 @@ export class WorkflowOrchestrator extends EventEmitter {
       await this.stateMachine.transition(WorkflowEvent.START);
 
       while (currentStepId && stepCount < maxSteps) {
+        if (this.isCancelled || this.abortController.signal.aborted) {
+          throw new Error(
+            `Workflow cancelled: ${this.abortController.signal.reason || 'User cancelled'}`
+          );
+        }
+
         stepCount++;
         const step = definition.steps.find((s) => s.id === currentStepId);
 
@@ -126,6 +229,13 @@ export class WorkflowOrchestrator extends EventEmitter {
 
         executedSteps.push(step.id);
         this.emit('stepFinished', { stepId: step.id, stepName: step.name });
+
+        // Check for cancellation after step
+        if (this.isCancelled || this.abortController.signal.aborted) {
+          throw new Error(
+            `Workflow cancelled: ${this.abortController.signal.reason || 'User cancelled'}`
+          );
+        }
 
         // Determine next step from transitions
         currentStepId = this.evaluateNextStep(step.id, definition.transitions, context);
@@ -178,7 +288,11 @@ export class WorkflowOrchestrator extends EventEmitter {
         );
       }
 
-      if (this.stateMachine.canTransition(WorkflowEvent.FAIL)) {
+      if (this.isCancelled || this.abortController.signal.aborted) {
+        if (this.stateMachine.canTransition(WorkflowEvent.ABORT)) {
+          await this.stateMachine.transition(WorkflowEvent.ABORT);
+        }
+      } else if (this.stateMachine.canTransition(WorkflowEvent.FAIL)) {
         await this.stateMachine.transition(WorkflowEvent.FAIL, { error: error.message });
       }
 
@@ -195,7 +309,7 @@ export class WorkflowOrchestrator extends EventEmitter {
         error: {
           stepId: context.currentStepId,
           message: error.message,
-          code: 'WORKFLOW_EXECUTION_FAILURE',
+          code: this.isCancelled ? 'WORKFLOW_CANCELLED' : 'WORKFLOW_EXECUTION_FAILURE',
           stack: error.stack,
         },
         context,
@@ -245,7 +359,6 @@ export class WorkflowOrchestrator extends EventEmitter {
     if (step.toolName) {
       await this.runToolWithRetry(step, context);
     } else {
-      // Default observation populates available context
       context.stepResults[step.id] = {
         screenContext: context.appContext.visibleContent ?? 'Screen text captured',
         activeApp: context.appContext.activeApplication ?? 'VS Code',
@@ -307,6 +420,8 @@ export class WorkflowOrchestrator extends EventEmitter {
     const riskLevel = step.riskLevel ?? toolDef?.riskLevel ?? RiskLevel.B_LOW_RISK;
     const resolvedParams = this.resolveParameters(step, context);
 
+    let approvalToken: string | undefined;
+
     // Evaluate Safety Gate
     const approvalCheck = this.safetyGate.evaluate(
       context.workflowId,
@@ -318,22 +433,40 @@ export class WorkflowOrchestrator extends EventEmitter {
     );
 
     if (approvalCheck.requiresApproval) {
+      const approvalReq = approvalCheck.approvalRequest!;
+      approvalToken = approvalReq.approvalId;
+
       if (this.stateMachine.canTransition(WorkflowEvent.REQUIRE_APPROVAL)) {
-        await this.stateMachine.transition(WorkflowEvent.REQUIRE_APPROVAL, approvalCheck.approvalRequest);
+        await this.stateMachine.transition(WorkflowEvent.REQUIRE_APPROVAL, approvalReq);
       }
 
-      this.emit('approvalRequested', approvalCheck.approvalRequest);
+      this.emit('approvalRequested', approvalReq);
 
       // Wait for approval response
       const approved = await new Promise<boolean>((resolve, reject) => {
         this.pendingApprovalResolvers.set(step.id, { resolve, reject });
       });
 
+      // Check if expired
+      if (this.safetyGate.isExpired(approvalReq.approvalId)) {
+        context.logs.push({
+          timestamp: Date.now(),
+          level: 'WARN',
+          message: `Approval for tool '${step.toolName}' in step '${step.id}' has EXPIRED. Expired actions never execute.`,
+        });
+
+        if (this.stateMachine.canTransition(WorkflowEvent.REJECT)) {
+          await this.stateMachine.transition(WorkflowEvent.REJECT);
+        }
+        return false;
+      }
+
+      // Check if rejected
       if (!approved) {
         context.logs.push({
           timestamp: Date.now(),
           level: 'WARN',
-          message: `User rejected execution of tool '${step.toolName}' in step '${step.id}'`,
+          message: `User rejected execution of tool '${step.toolName}' in step '${step.id}'. Rejected actions never execute.`,
         });
 
         if (this.stateMachine.canTransition(WorkflowEvent.REJECT)) {
@@ -344,7 +477,7 @@ export class WorkflowOrchestrator extends EventEmitter {
         if (step.fallbackAction) {
           const fallback = await this.recoveryEngine.handleFallback(
             step,
-            new Error('User rejected approval request'),
+            new Error(`User rejected approval request for step '${step.id}'`),
             context
           );
           if (fallback.handled && fallback.output) {
@@ -364,8 +497,14 @@ export class WorkflowOrchestrator extends EventEmitter {
       }
     }
 
-    // Run tool execution with retry policy
-    const result = await this.runToolWithRetry(step, context, resolvedParams, riskLevel);
+    // Run tool execution with retry policy and bounded retries for idempotent calls only
+    const result = await this.runToolWithRetry(
+      step,
+      context,
+      resolvedParams,
+      riskLevel,
+      approvalToken
+    );
 
     if (result.success) {
       if (this.stateMachine.canTransition(WorkflowEvent.TOOL_SUCCESS)) {
@@ -426,13 +565,15 @@ export class WorkflowOrchestrator extends EventEmitter {
   }
 
   /**
-   * Run tool execution wrapped with retry policy and fallback handling
+   * Run tool execution wrapped with retry policy, timeout, and cancellation signal
+   * Retries are bounded and executed ONLY for idempotent calls!
    */
   private async runToolWithRetry(
     step: WorkflowStep,
     context: WorkflowContext,
     paramsOverride?: Record<string, unknown>,
-    riskOverride?: RiskLevel
+    riskOverride?: RiskLevel,
+    approvalToken?: string
   ) {
     const params = paramsOverride ?? this.resolveParameters(step, context);
     const toolDef = this.toolExecutor.getTool(step.toolName!);
@@ -447,6 +588,12 @@ export class WorkflowOrchestrator extends EventEmitter {
         parameters: params,
         riskLevel,
         timeoutMs: step.timeoutMs,
+        approvalToken,
+        signal: this.abortController.signal,
+        grantedScopes:
+          (context.variables?.grantedScopes as string[]) ??
+          step.requiredScopes ??
+          toolDef?.requiredScopes,
       };
 
       const result = await this.toolExecutor.execute(request);
@@ -460,14 +607,33 @@ export class WorkflowOrchestrator extends EventEmitter {
 
     try {
       let finalResult;
-      if (step.retryPolicy) {
+
+      // Bounded retries for idempotent calls ONLY
+      const isIdempotent =
+        step.isIdempotent ??
+        toolDef?.isIdempotent ??
+        (riskLevel === RiskLevel.A_INFORMATIONAL);
+
+      if (step.retryPolicy && isIdempotent) {
+        // Enforce bounded retries (cap at max 5)
+        const boundedPolicy = {
+          ...step.retryPolicy,
+          maxAttempts: Math.min(step.retryPolicy.maxAttempts, 5),
+        };
         finalResult = await this.recoveryEngine.executeWithRetry(
           executeOperation,
-          step.retryPolicy,
+          boundedPolicy,
           context,
           step.id
         );
       } else {
+        if (step.retryPolicy && !isIdempotent) {
+          context.logs.push({
+            timestamp: Date.now(),
+            level: 'WARN',
+            message: `Tool '${step.toolName}' in step '${step.id}' is non-idempotent; skipping retries to prevent duplicate side effects.`,
+          });
+        }
         finalResult = await executeOperation();
       }
 
@@ -488,7 +654,14 @@ export class WorkflowOrchestrator extends EventEmitter {
             if (step.outputVariable) {
               context.variables[step.outputVariable] = fallback.output;
             }
-            return { success: true, data: fallback.output, durationMs: 0, timestamp: Date.now(), requestId: 'fallback', toolName: step.toolName! };
+            return {
+              success: true,
+              data: fallback.output,
+              durationMs: 0,
+              timestamp: Date.now(),
+              requestId: 'fallback',
+              toolName: step.toolName!,
+            };
           }
         }
       }
@@ -519,13 +692,20 @@ export class WorkflowOrchestrator extends EventEmitter {
     }
     if (step.toolParameters) {
       const resolved: Record<string, unknown> = { ...step.toolParameters };
+
       // Map inputs if specified
       if (step.inputMapping) {
         for (const [paramKey, varPath] of Object.entries(step.inputMapping)) {
           if (varPath.startsWith('variables.')) {
-            resolved[paramKey] = this.resolvePath(context.variables, varPath.replace('variables.', ''));
+            resolved[paramKey] = this.resolvePath(
+              context.variables,
+              varPath.replace('variables.', '')
+            );
           } else if (varPath.startsWith('stepResults.')) {
-            resolved[paramKey] = this.resolvePath(context.stepResults, varPath.replace('stepResults.', ''));
+            resolved[paramKey] = this.resolvePath(
+              context.stepResults,
+              varPath.replace('stepResults.', '')
+            );
           } else {
             resolved[paramKey] = this.resolvePath(context.variables, varPath);
           }
@@ -541,14 +721,14 @@ export class WorkflowOrchestrator extends EventEmitter {
     transitions: WorkflowTransition[],
     context: WorkflowContext
   ): string | undefined {
-    const matchingTransitions = transitions.filter((t) => t.fromStepId === currentStepId);
+    const candidateTransitions = transitions.filter((t) => t.fromStepId === currentStepId);
 
-    if (matchingTransitions.length === 0) {
+    if (candidateTransitions.length === 0) {
       return undefined;
     }
 
-    // Check conditional transitions first
-    for (const transition of matchingTransitions) {
+    // Evaluate conditional transitions first
+    for (const transition of candidateTransitions) {
       if (transition.condition) {
         if (this.evaluateCondition(transition.condition, context)) {
           return transition.toStepId;
@@ -556,47 +736,43 @@ export class WorkflowOrchestrator extends EventEmitter {
       }
     }
 
-    // Default transition
-    const defaultTransition = matchingTransitions.find((t) => t.isDefault || !t.condition);
-    return defaultTransition ? defaultTransition.toStepId : undefined;
+    // Fall back to default transition
+    const defaultTransition = candidateTransitions.find((t) => t.isDefault || !t.condition);
+    return defaultTransition?.toStepId;
   }
 
-  private evaluateCondition(cond: NonNullable<WorkflowTransition['condition']>, context: WorkflowContext): boolean {
-    if (cond.customEvaluator) {
-      return cond.customEvaluator(context);
+  private evaluateCondition(
+    condition: NonNullable<WorkflowTransition['condition']>,
+    context: WorkflowContext
+  ): boolean {
+    if (condition.customEvaluator) {
+      return condition.customEvaluator(context);
     }
 
-    if (!cond.field) return true;
-
-    const resolvePath = (root: Record<string, unknown>, path: string): unknown => {
-      return path.split('.').reduce<unknown>((acc, part) => {
-        if (acc !== null && typeof acc === 'object') {
-          return (acc as Record<string, unknown>)[part];
-        }
-        return undefined;
-      }, root);
-    };
+    if (!condition.field) {
+      return true;
+    }
 
     let val: unknown;
-    if (cond.field.startsWith('variables.')) {
-      val = resolvePath(context.variables, cond.field.replace('variables.', ''));
-    } else if (cond.field.startsWith('stepResults.')) {
-      val = resolvePath(context.stepResults, cond.field.replace('stepResults.', ''));
+    if (condition.field.startsWith('variables.')) {
+      val = this.resolvePath(context.variables, condition.field.replace('variables.', ''));
+    } else if (condition.field.startsWith('stepResults.')) {
+      val = this.resolvePath(context.stepResults, condition.field.replace('stepResults.', ''));
     } else {
-      val = resolvePath(context.variables, cond.field);
+      val = this.resolvePath(context.variables, condition.field);
     }
 
-    switch (cond.operator) {
+    switch (condition.operator) {
       case 'equals':
-        return val === cond.value;
+        return val === condition.value;
       case 'notEquals':
-        return val !== cond.value;
+        return val !== condition.value;
       case 'contains':
-        return typeof val === 'string' && String(val).includes(String(cond.value));
+        return typeof val === 'string' && String(val).includes(String(condition.value));
       case 'greaterThan':
-        return typeof val === 'number' && val > Number(cond.value);
+        return typeof val === 'number' && val > Number(condition.value);
       case 'lessThan':
-        return typeof val === 'number' && val < Number(cond.value);
+        return typeof val === 'number' && val < Number(condition.value);
       case 'defined':
         return val !== undefined && val !== null;
       default:

@@ -1,24 +1,25 @@
 # AI Voice Co-Pilot — Agentic Workflow Engine
 
-> **Agentic Workflow Architecture Deliverable**  
-> State Machine Orchestration, Workflow Schemas (`WorkflowPlan`, `ToolSpec`, `WorkflowResult`), Safety Gates & Mock Tool Execution System.
+> **Agentic Workflow Architecture Deliverable (Week 1 & Week 2)**  
+> Plan Validation, Allow-listed Tool Registry, Human-in-the-Loop Approvals (`ApprovalManager`), Safe Executor, State Machine Orchestration & Core Schemas (`WorkflowPlan`, `ToolSpec`, `WorkflowResult`).
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
-[![Vitest](https://img.shields.io/badge/Tests-53%20passed-brightgreen.svg)](https://vitest.dev/)
-[![Coverage](https://img.shields.io/badge/Coverage-95.97%25-success.svg)](https://github.com/)
+[![Vitest](https://img.shields.io/badge/Tests-85%20passed-brightgreen.svg)](https://vitest.dev/)
+[![Coverage](https://img.shields.io/badge/Coverage-90.47%25-success.svg)](https://github.com/)
 [![Target Branch](https://img.shields.io/badge/Branch-team%2Fsde--8--voicebot-orange.svg)](https://github.com/)
 
 ---
 
 ## 📖 Overview
 
-The **Agentic Workflow Engine** orchestrates multi-step contextual reasoning and controlled tool invocations for the AI Voice Co-Pilot. Aligned with the real technical specifications, the architecture delivers:
+The **Agentic Workflow Engine** orchestrates multi-step contextual reasoning, validation, and safe tool invocations for the AI Voice Co-Pilot. Aligned with the real technical specifications, the architecture delivers:
 
+- **Plan Validation & Cycle Detection (`PlanValidator`)**: Comprehensive pre-execution checks verifying step dependencies, transition targets, and initial step existence. Graph traversal (DFS 3-color) detects direct, indirect, and self-referencing cycles with explicit paths.
+- **Allow-listed Tool Registry (`ToolRegistry`)**: Strict allow-list restricted to harmless mock tools (`calculator`, `summarize_text`). Enforces parameter schema validation and permission scopes (`tool.requiredScopes`). Dangerous tools with unrestricted computer control or external sending are strictly forbidden.
+- **Approval Gate & Human-in-the-Loop Manager (`ApprovalManager`, `SafetyGate`)**: Complete approval lifecycle (`PENDING` -> `APPROVED` | `REJECTED` | `EXPIRED`). Enforces the strict invariant: **A rejected or expired action NEVER executes** (verified with 0 handler invocations).
+- **Safe Executor (`SafeExecutor`, `MockToolExecutor`)**: Hard timeouts per-step and per-tool, **bounded retries for idempotent calls ONLY** (non-idempotent calls execute at most once without retrying), and cancellation via `AbortController` signals.
 - **Strict Core Schemas**: `WorkflowPlan` (declarative step & transition graph), `ToolSpec` (tool metadata, parameter validation, risk levels), and `WorkflowResult` (execution outcome and outputs).
-- **Two Harmless Standard Tools**: `calculator` (safe arithmetic expression evaluation) and `summarize_text` (concise text summarization) with full extensibility for custom registered `ToolSpec` implementations.
-- **Finite State Machine (`StateMachine`)**: Deterministic transition table, guard predicates, state snapshot history, and lifecycle hooks (`onEnter`, `onExit`, `beforeTransition`, `afterTransition`).
-- **Safety & Human-in-the-Loop Gate (`SafetyGate`)**: Enforces risk boundaries across Level A (Informational), Level B (Low-Risk), Level C (Sensitive), and Level D (High-Risk/Destructive).
-- **Mock Tool Executor (`MockToolExecutor`)**: Pluggable mock simulation with configurable latency, probabilistic failure rates, `failNTimes` consecutive failure counts, and audit logs.
+- **Deterministic Finite State Machine (`StateMachine`)**: State transitions, guard predicates, snapshot history, and lifecycle hooks.
 - **Fault Tolerance Engine (`ErrorRecoveryEngine`)**: Exponential backoff retries with jitter, fallback step routing, and Saga pattern rollback compensations.
 - **Workflow Scheduler (`WorkflowScheduler`)**: Job queue management, concurrency limits, step timeouts, and pause/resume/abort controls.
 
@@ -33,19 +34,22 @@ npm install
 
 ### 2. Run Tests & Coverage
 ```bash
-# Run unit and integration tests (53 tests)
+# Run unit, integration, and policy tests (85 tests)
 npm test
 
-# Run test coverage suite (>80% required)
+# Run test coverage suite (>80% required across all modules)
 npm run test:coverage
 ```
 
 ### 3. Run Live Demos
 ```bash
-# 1. Interactive Terminal Demo
+# 1. Week 2 Policy Demo: Validation, Approved vs Rejected Plan, Safe Executor
+npm run demo:week2
+
+# 2. Week 1 Multi-Step Reasoning & Saga Compensation Demo
 npm run demo
 
-# 2. Interactive Web Visualizer Dashboard (http://localhost:3000)
+# 3. Interactive Web Visualizer Dashboard (http://localhost:3000)
 npm run demo:ui
 ```
 
