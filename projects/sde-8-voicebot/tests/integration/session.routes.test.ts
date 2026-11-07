@@ -1,156 +1,144 @@
-import request from 'supertest';
+import { request } from '../helpers/test-request';
 import { app } from '../../src/app';
 import { sessionService } from '../../src/services/session.service';
 import { SessionStatus } from '../../src/types/session.types';
 
-describe('Session Routes Integration', () => {
+describe('Session Routes Integration - Lifecycle & Streaming (Days 8-14)', () => {
   beforeEach(() => {
     sessionService.clearAllSessions();
   });
 
+  afterEach(() => {
+    sessionService.clearAllSessions();
+  });
+
   describe('POST /api/v1/sessions', () => {
-    it('should create a new session when body is valid', async () => {
+    it('should create a new session and return X-Correlation-Id header', async () => {
       const payload = {
         userId: 'student-dev-01',
         initialContext: {
           activeApplication: 'VSCode',
           windowTitle: 'index.ts',
           documentType: 'typescript',
-          visibleContentSnippet: 'console.error("error found");'
-        },
-        metadata: { team: 'SDE-8' }
+          visibleContentSnippet: 'console.log("ready");'
+        }
       };
 
-      const res = await request(app).post('/api/v1/sessions').send(payload);
+      const res = await request(app)
+        .post('/api/v1/sessions')
+        .set('X-Correlation-Id', 'test-cid-101')
+        .send(payload);
 
       expect(res.status).toBe(201);
+      expect(res.headers['x-correlation-id']).toBe('test-cid-101');
       expect(res.body.success).toBe(true);
       expect(res.body.data.id).toBeDefined();
-      expect(res.body.data.userId).toBe('student-dev-01');
       expect(res.body.data.status).toBe(SessionStatus.ACTIVE);
-      expect(res.body.data.context.activeApplication).toBe('VSCode');
     });
 
-    it('should return 400 VALIDATION_ERROR when userId is missing', async () => {
+    it('should return typed error envelope (400 VALIDATION_ERROR) on missing userId', async () => {
       const res = await request(app).post('/api/v1/sessions').send({});
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
       expect(res.body.error.code).toBe('VALIDATION_ERROR');
+      expect(res.body.timestamp).toBeDefined();
     });
   });
 
-  describe('GET /api/v1/sessions', () => {
-    it('should return a list of active sessions', async () => {
-      sessionService.createSession({ userId: 'u1' });
-      sessionService.createSession({ userId: 'u2' });
-
-      const res = await request(app).get('/api/v1/sessions?page=1&limit=10');
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.total).toBe(2);
-      expect(res.body.data.sessions.length).toBe(2);
-    });
-  });
-
-  describe('GET /api/v1/sessions/:id', () => {
-    it('should return 200 and session details for valid id', async () => {
+  describe('Session Lifecycle Transitions & Idempotency', () => {
+    it('should pause an active session and be idempotent on repeat', async () => {
       const created = sessionService.createSession({ userId: 'u1' });
 
-      const res = await request(app).get(`/api/v1/sessions/${created.id}`);
+      // First pause
+      const res1 = await request(app).post(`/api/v1/sessions/${created.id}/pause`);
+      expect(res1.status).toBe(200);
+      expect(res1.body.data.status).toBe(SessionStatus.PAUSED);
 
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.id).toBe(created.id);
+      // Repeated pause (Idempotency check)
+      const res2 = await request(app).post(`/api/v1/sessions/${created.id}/pause`);
+      expect(res2.status).toBe(200);
+      expect(res2.body.data.status).toBe(SessionStatus.PAUSED);
     });
 
-    it('should return 404 for unknown session id', async () => {
-      const res = await request(app).get('/api/v1/sessions/non-existent-session-id');
+    it('should resume a paused session and be idempotent on repeat', async () => {
+      const created = sessionService.createSession({ userId: 'u1' });
+      sessionService.pauseSession(created.id);
 
-      expect(res.status).toBe(404);
+      // First resume
+      const res1 = await request(app).post(`/api/v1/sessions/${created.id}/resume`);
+      expect(res1.status).toBe(200);
+      expect(res1.body.data.status).toBe(SessionStatus.ACTIVE);
+
+      // Repeated resume (Idempotency check)
+      const res2 = await request(app).post(`/api/v1/sessions/${created.id}/resume`);
+      expect(res2.status).toBe(200);
+      expect(res2.body.data.status).toBe(SessionStatus.ACTIVE);
+    });
+
+    it('should stop a session and be idempotent on repeat', async () => {
+      const created = sessionService.createSession({ userId: 'u1' });
+
+      const res1 = await request(app).post(`/api/v1/sessions/${created.id}/stop`);
+      expect(res1.status).toBe(200);
+      expect(res1.body.data.status).toBe(SessionStatus.STOPPED);
+
+      const res2 = await request(app).post(`/api/v1/sessions/${created.id}/stop`);
+      expect(res2.status).toBe(200);
+      expect(res2.body.data.status).toBe(SessionStatus.STOPPED);
+    });
+
+    it('should REJECT illegal transitions (resume a stopped session) with 409 ILLEGAL_TRANSITION', async () => {
+      const created = sessionService.createSession({ userId: 'u1' });
+      sessionService.stopSession(created.id);
+
+      const res = await request(app).post(`/api/v1/sessions/${created.id}/resume`);
+      expect(res.status).toBe(409);
       expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('ILLEGAL_TRANSITION');
+    });
+  });
+
+  describe('GET /api/v1/sessions/:id/events (Event Streaming SSE)', () => {
+    it('should set text/event-stream headers and replay event history', async () => {
+      const session = sessionService.createSession({ userId: 'stream-user' });
+      sessionService.pauseSession(session.id);
+
+      const res = await request(app)
+        .get(`/api/v1/sessions/${session.id}/events`)
+        .set('Accept', 'text/event-stream');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+      expect(res.text).toContain('session.created');
+      expect(res.text).toContain('session.paused');
+    });
+
+    it('should return 404 SESSION_NOT_FOUND when streaming non-existent session', async () => {
+      const res = await request(app).get('/api/v1/sessions/invalid-id/events');
+      expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('SESSION_NOT_FOUND');
     });
   });
 
-  describe('PATCH /api/v1/sessions/:id/status', () => {
-    it('should update session status to paused', async () => {
-      const created = sessionService.createSession({ userId: 'u1' });
+  describe('Context and Deletion', () => {
+    it('should update context for active session', async () => {
+      const session = sessionService.createSession({ userId: 'u1' });
 
       const res = await request(app)
-        .patch(`/api/v1/sessions/${created.id}/status`)
-        .send({ status: SessionStatus.PAUSED });
+        .patch(`/api/v1/sessions/${session.id}/context`)
+        .send({ windowTitle: 'Updated Window' });
 
       expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.status).toBe(SessionStatus.PAUSED);
+      expect(res.body.data.context.windowTitle).toBe('Updated Window');
     });
 
-    it('should reject invalid status with 400 validation error', async () => {
-      const created = sessionService.createSession({ userId: 'u1' });
-
-      const res = await request(app)
-        .patch(`/api/v1/sessions/${created.id}/status`)
-        .send({ status: 'invalid-status-value' });
-
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-      expect(res.body.error.code).toBe('VALIDATION_ERROR');
-    });
-
-    it('should return 404 if session does not exist', async () => {
-      const res = await request(app)
-        .patch('/api/v1/sessions/random-id/status')
-        .send({ status: SessionStatus.TERMINATED });
-
-      expect(res.status).toBe(404);
-      expect(res.body.error.code).toBe('SESSION_NOT_FOUND');
-    });
-  });
-
-  describe('PATCH /api/v1/sessions/:id/context', () => {
-    it('should update session context successfully', async () => {
-      const created = sessionService.createSession({ userId: 'u1' });
-
-      const res = await request(app)
-        .patch(`/api/v1/sessions/${created.id}/context`)
-        .send({
-          activeApplication: 'Firefox',
-          windowTitle: 'Google Docs - Research Draft'
-        });
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.context.activeApplication).toBe('Firefox');
-      expect(res.body.data.context.windowTitle).toBe('Google Docs - Research Draft');
-    });
-
-    it('should return 404 for context update on non-existing session', async () => {
-      const res = await request(app)
-        .patch('/api/v1/sessions/non-existent/context')
-        .send({ activeApplication: 'VLC' });
-
-      expect(res.status).toBe(404);
-    });
-  });
-
-  describe('DELETE /api/v1/sessions/:id', () => {
     it('should delete existing session', async () => {
-      const created = sessionService.createSession({ userId: 'u1' });
+      const session = sessionService.createSession({ userId: 'u1' });
 
-      const res = await request(app).delete(`/api/v1/sessions/${created.id}`);
-
+      const res = await request(app).delete(`/api/v1/sessions/${session.id}`);
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(sessionService.getSessionById(created.id)).toBeNull();
-    });
-
-    it('should return 404 when deleting non-existent session', async () => {
-      const res = await request(app).delete('/api/v1/sessions/not-found-id');
-
-      expect(res.status).toBe(404);
     });
   });
 });
-

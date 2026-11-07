@@ -1,11 +1,13 @@
+export interface ApiErrorEnvelope {
+  code: string;
+  details?: unknown;
+}
+
 export interface ApiResponse<T = unknown> {
   success: boolean;
   message?: string;
   data?: T;
-  error?: {
-    code: string;
-    details?: unknown;
-  };
+  error?: ApiErrorEnvelope;
   timestamp: string;
 }
 
@@ -14,3 +16,10 @@ export interface PaginationParams {
   limit?: number;
 }
 
+declare global {
+  namespace Express {
+    interface Request {
+      correlationId?: string;
+    }
+  }
+}

@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { loggerMiddleware } from '../../src/middleware/logger.middleware';
+import { loggerMiddleware, sanitizePayload } from '../../src/middleware/logger.middleware';
 
-describe('Logger Middleware', () => {
+describe('Logger Middleware & Sensitive Payload Redaction', () => {
   let mockRequest: Partial<Request>;
   let mockResponse: Partial<Response>;
   let mockNext: NextFunction;
@@ -11,13 +11,15 @@ describe('Logger Middleware', () => {
   beforeEach(() => {
     consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     mockRequest = {
-      method: 'GET',
+      method: 'POST',
       originalUrl: '/api/v1/sessions',
+      headers: {},
       ip: '127.0.0.1',
-      get: jest.fn().mockReturnValue('jest-agent')
+      get: jest.fn().mockReturnValue('test-agent')
     };
     mockResponse = {
       statusCode: 200,
+      setHeader: jest.fn().mockReturnThis(),
       on: jest.fn().mockImplementation((event: string, callback: () => void) => {
         if (event === 'finish') {
           finishCallback = callback;
@@ -32,32 +34,62 @@ describe('Logger Middleware', () => {
     consoleSpy.mockRestore();
   });
 
-  it('should call next() and attach finish listener', () => {
+  it('should generate a correlation ID and set X-Correlation-Id response header', () => {
     loggerMiddleware(mockRequest as Request, mockResponse as Response, mockNext);
 
+    expect(mockRequest.correlationId).toBeDefined();
+    expect(mockResponse.setHeader).toHaveBeenCalledWith('X-Correlation-Id', mockRequest.correlationId);
     expect(mockNext).toHaveBeenCalledTimes(1);
-    expect(mockResponse.on).toHaveBeenCalledWith('finish', expect.any(Function));
   });
 
-  it('should log request details on response finish', () => {
-    loggerMiddleware(mockRequest as Request, mockResponse as Response, mockNext);
-    finishCallback();
+  it('should preserve existing incoming x-correlation-id header', () => {
+    mockRequest.headers = { 'x-correlation-id': 'client-corr-999' };
 
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringMatching(/\[.*\] GET \/api\/v1\/sessions.*200.*ms/)
-    );
+    loggerMiddleware(mockRequest as Request, mockResponse as Response, mockNext);
+
+    expect(mockRequest.correlationId).toBe('client-corr-999');
+    expect(mockResponse.setHeader).toHaveBeenCalledWith('X-Correlation-Id', 'client-corr-999');
   });
 
-  it('should log 400 and 500 status codes properly', () => {
-    mockResponse.statusCode = 404;
+  it('should log structured JSON on request finish', () => {
     loggerMiddleware(mockRequest as Request, mockResponse as Response, mockNext);
     finishCallback();
-    expect(consoleSpy).toHaveBeenCalled();
 
-    mockResponse.statusCode = 500;
-    loggerMiddleware(mockRequest as Request, mockResponse as Response, mockNext);
-    finishCallback();
-    expect(consoleSpy).toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0]);
+    expect(loggedJson.correlationId).toBeDefined();
+    expect(loggedJson.method).toBe('POST');
+    expect(loggedJson.path).toBe('/api/v1/sessions');
+    expect(loggedJson.statusCode).toBe(200);
+    expect(loggedJson.level).toBe('info');
+  });
+
+  describe('sanitizePayload', () => {
+    it('should redact sensitive keys (password, token, apiKey, secret)', () => {
+      const payload = {
+        userId: 'dev-1',
+        password: 'my-super-secret-password',
+        auth: {
+          token: 'jwt.token.here',
+          apiKey: 'secret_api_key_123'
+        },
+        context: {
+          visibleText: 'safe content'
+        }
+      };
+
+      const sanitized: any = sanitizePayload(payload);
+
+      expect(sanitized.userId).toBe('dev-1');
+      expect(sanitized.password).toBe('[REDACTED]');
+      expect(sanitized.auth).toBe('[REDACTED]');
+      expect(sanitized.context.visibleText).toBe('safe content');
+    });
+
+    it('should handle non-object inputs gracefully', () => {
+      expect(sanitizePayload(null)).toBeNull();
+      expect(sanitizePayload('string')).toBe('string');
+      expect(sanitizePayload(42)).toBe(42);
+    });
   });
 });
-

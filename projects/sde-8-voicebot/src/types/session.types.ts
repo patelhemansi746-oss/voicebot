@@ -3,8 +3,17 @@ import { z } from 'zod';
 export enum SessionStatus {
   ACTIVE = 'active',
   PAUSED = 'paused',
-  IDLE = 'idle',
-  TERMINATED = 'terminated'
+  STOPPED = 'stopped',
+  EXPIRED = 'expired'
+}
+
+export enum SessionEventType {
+  SESSION_CREATED = 'session.created',
+  SESSION_PAUSED = 'session.paused',
+  SESSION_RESUMED = 'session.resumed',
+  SESSION_STOPPED = 'session.stopped',
+  SESSION_EXPIRED = 'session.expired',
+  CONTEXT_UPDATED = 'context.updated'
 }
 
 export interface SessionContext {
@@ -13,6 +22,14 @@ export interface SessionContext {
   documentType?: string;
   visibleContentSnippet?: string;
   lastUpdated: string;
+}
+
+export interface SessionEvent {
+  id: string;
+  sessionId: string;
+  type: SessionEventType;
+  timestamp: string;
+  payload?: Record<string, unknown>;
 }
 
 export interface VoiceSession {
@@ -28,16 +45,16 @@ export interface VoiceSession {
 
 // Zod Validation Schemas
 export const createSessionSchema = z.object({
-  userId: z.string().min(1, 'userId is required'),
+  userId: z.string().min(1, 'userId is required').max(128, 'userId cannot exceed 128 characters'),
   initialContext: z
     .object({
-      activeApplication: z.string().optional(),
-      windowTitle: z.string().optional(),
-      documentType: z.string().optional(),
-      visibleContentSnippet: z.string().optional()
+      activeApplication: z.string().max(256).optional(),
+      windowTitle: z.string().max(256).optional(),
+      documentType: z.string().max(128).optional(),
+      visibleContentSnippet: z.string().max(50000, 'visibleContentSnippet cannot exceed 50000 characters').optional()
     })
     .optional(),
-  metadata: z.record(z.unknown()).optional().default({})
+  metadata: z.record(z.unknown()).optional()
 });
 
 export const updateSessionStatusSchema = z.object({
@@ -45,13 +62,22 @@ export const updateSessionStatusSchema = z.object({
 });
 
 export const updateSessionContextSchema = z.object({
-  activeApplication: z.string().optional(),
-  windowTitle: z.string().optional(),
-  documentType: z.string().optional(),
-  visibleContentSnippet: z.string().optional()
+  activeApplication: z.string().max(256).optional(),
+  windowTitle: z.string().max(256).optional(),
+  documentType: z.string().max(128).optional(),
+  visibleContentSnippet: z.string().max(50000, 'visibleContentSnippet cannot exceed 50000 characters').optional()
 });
 
-export type CreateSessionDto = z.infer<typeof createSessionSchema>;
+export interface CreateSessionDto {
+  userId: string;
+  initialContext?: {
+    activeApplication?: string;
+    windowTitle?: string;
+    documentType?: string;
+    visibleContentSnippet?: string;
+  };
+  metadata?: Record<string, unknown>;
+}
+
 export type UpdateSessionStatusDto = z.infer<typeof updateSessionStatusSchema>;
 export type UpdateSessionContextDto = z.infer<typeof updateSessionContextSchema>;
-

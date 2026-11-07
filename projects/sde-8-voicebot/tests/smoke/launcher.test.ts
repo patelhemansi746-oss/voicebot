@@ -30,4 +30,3 @@ describe('Service Launcher Smoke Tests', () => {
     expect(launcher.getActiveServiceCount()).toBe(0);
   });
 });
-

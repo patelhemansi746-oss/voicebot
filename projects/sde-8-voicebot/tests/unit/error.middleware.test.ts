@@ -67,6 +67,39 @@ describe('Error Middleware', () => {
       );
     });
 
+    it('should handle payload too large error with 413 and PAYLOAD_TOO_LARGE code', () => {
+      const largeErr = {
+        type: 'entity.too.large',
+        limit: 102400,
+        message: 'request entity too large'
+      };
+
+      errorHandler(largeErr, mockRequest as Request, mockResponse as Response, mockNext);
+
+      expect(mockResponse.status).toHaveBeenCalledWith(413);
+      expect(mockResponse.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          message: 'Request payload exceeds the permitted limit',
+          error: {
+            code: 'PAYLOAD_TOO_LARGE',
+            details: { limit: 102400 }
+          }
+        })
+      );
+    });
+
+    it('should handle generic error with custom status', () => {
+      const customStatusErr = {
+        status: 403,
+        message: 'Forbidden access'
+      };
+
+      errorHandler(customStatusErr, mockRequest as Request, mockResponse as Response, mockNext);
+
+      expect(mockResponse.status).toHaveBeenCalledWith(403);
+    });
+
     it('should handle generic unhandled Error as 500', () => {
       const genericErr = new Error('Unexpected crash');
 
@@ -85,4 +118,3 @@ describe('Error Middleware', () => {
     });
   });
 });
-

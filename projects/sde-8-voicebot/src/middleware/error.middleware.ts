@@ -29,19 +29,33 @@ export const notFoundHandler = (req: Request, res: Response, next: NextFunction)
 };
 
 export const errorHandler = (
-  err: Error | AppError,
+  err: Error | AppError | any,
   req: Request,
   res: Response,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   next: NextFunction
 ): void => {
-  const statusCode = err instanceof AppError ? err.statusCode : 500;
-  const errorCode = err instanceof AppError ? err.errorCode : 'INTERNAL_SERVER_ERROR';
-  const details = err instanceof AppError ? err.details : undefined;
+  let statusCode = 500;
+  let errorCode = 'INTERNAL_SERVER_ERROR';
+  let message = err.message || 'An unexpected error occurred';
+  let details: unknown = undefined;
+
+  if (err instanceof AppError) {
+    statusCode = err.statusCode;
+    errorCode = err.errorCode;
+    details = err.details;
+  } else if (err.type === 'entity.too.large' || err.statusCode === 413) {
+    statusCode = 413;
+    errorCode = 'PAYLOAD_TOO_LARGE';
+    message = 'Request payload exceeds the permitted limit';
+    details = { limit: err.limit };
+  } else if (err.status && typeof err.status === 'number') {
+    statusCode = err.status;
+  }
 
   const response: ApiResponse = {
     success: false,
-    message: err.message || 'An unexpected error occurred',
+    message,
     error: {
       code: errorCode,
       details
@@ -49,12 +63,18 @@ export const errorHandler = (
     timestamp: new Date().toISOString()
   };
 
-  // Only log full stack in development/non-operational errors
   if (statusCode >= 500) {
     // eslint-disable-next-line no-console
-    console.error(`[Error] ${statusCode} - ${err.message}`, err.stack);
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        correlationId: req.correlationId,
+        statusCode,
+        message: err.message,
+        stack: err.stack
+      })
+    );
   }
 
   res.status(statusCode).json(response);
 };
-

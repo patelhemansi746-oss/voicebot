@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { sessionService } from '../services/session.service';
 import { AppError } from '../middleware/error.middleware';
 import { ApiResponse } from '../types/common.types';
-import { SessionStatus } from '../types/session.types';
+import { SessionEvent } from '../types/session.types';
 
 export class SessionController {
   /**
@@ -84,27 +84,74 @@ export class SessionController {
   };
 
   /**
-   * PATCH /api/v1/sessions/:id/status
+   * POST /api/v1/sessions/:id/pause
+   * Idempotent session pausing
    */
-  public updateStatus = async (
+  public pauseSession = async (
     req: Request,
     res: Response,
     next: NextFunction
   ): Promise<void> => {
     try {
       const { id } = req.params;
-      const { status } = req.body as { status: SessionStatus };
-
-      const updated = sessionService.updateSessionStatus(id, status);
-
-      if (!updated) {
-        throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND');
-      }
+      const session = sessionService.pauseSession(id);
 
       const response: ApiResponse = {
         success: true,
-        message: `Session status updated to '${status}'`,
-        data: updated,
+        message: `Session '${id}' is now paused`,
+        data: session,
+        timestamp: new Date().toISOString()
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * POST /api/v1/sessions/:id/resume
+   * Idempotent session resuming
+   */
+  public resumeSession = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const { id } = req.params;
+      const session = sessionService.resumeSession(id);
+
+      const response: ApiResponse = {
+        success: true,
+        message: `Session '${id}' resumed to active`,
+        data: session,
+        timestamp: new Date().toISOString()
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * POST /api/v1/sessions/:id/stop
+   * Idempotent session stopping
+   */
+  public stopSession = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const { id } = req.params;
+      const session = sessionService.stopSession(id);
+
+      const response: ApiResponse = {
+        success: true,
+        message: `Session '${id}' has been stopped`,
+        data: session,
         timestamp: new Date().toISOString()
       };
 
@@ -125,10 +172,6 @@ export class SessionController {
     try {
       const { id } = req.params;
       const updated = sessionService.updateSessionContext(id, req.body);
-
-      if (!updated) {
-        throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND');
-      }
 
       const response: ApiResponse = {
         success: true,
@@ -161,7 +204,7 @@ export class SessionController {
 
       const response: ApiResponse = {
         success: true,
-        message: `Session '${id}' successfully terminated`,
+        message: `Session '${id}' successfully terminated and removed`,
         timestamp: new Date().toISOString()
       };
 
@@ -170,7 +213,54 @@ export class SessionController {
       next(error);
     }
   };
+
+  /**
+   * GET /api/v1/sessions/:id/events
+   * Server-Sent Events (SSE) streaming endpoint
+   * Streams ordered session events in real-time and replays history.
+   */
+  public streamSessionEvents = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const { id } = req.params;
+      // Validates session exists and fetches historical events
+      const history = sessionService.getSessionEvents(id);
+
+      // SSE Headers
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders();
+
+      // Format helper for SSE
+      const writeEvent = (event: SessionEvent) => {
+        res.write(`id: ${event.id}\n`);
+        res.write(`event: ${event.type}\n`);
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      };
+
+      // 1. Replay historical events in order
+      for (const event of history) {
+        writeEvent(event);
+      }
+
+      // 2. Subscribe to live events
+      const unsubscribe = sessionService.subscribeToSessionEvents(id, (event) => {
+        writeEvent(event);
+      });
+
+      // 3. Clean up on connection close
+      req.on('close', () => {
+        unsubscribe();
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
 }
 
 export const sessionController = new SessionController();
-

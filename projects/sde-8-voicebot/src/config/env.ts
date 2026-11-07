@@ -1,22 +1,32 @@
 import dotenv from 'dotenv';
+import { z } from 'zod';
 
 dotenv.config();
 
-export interface EnvConfig {
-  PORT: number;
-  NODE_ENV: string;
-  API_PREFIX: string;
-  CORS_ORIGIN: string;
-  SESSION_TIMEOUT_MINUTES: number;
-  MAX_CONCURRENT_SESSIONS: number;
-}
+const envSchema = z.object({
+  PORT: z.coerce.number().int().positive().default(5000),
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  API_PREFIX: z.string().default('/api/v1'),
+  CORS_ORIGIN: z.string().default('*'),
+  SESSION_TIMEOUT_MINUTES: z.coerce.number().int().positive().default(30),
+  MAX_CONCURRENT_SESSIONS: z.coerce.number().int().positive().default(100),
+  MAX_PAYLOAD_LIMIT: z.string().default('100kb'),
+  MOCK_MODE: z
+    .string()
+    .transform((val) => val === 'true' || val === '1')
+    .default('true')
+});
 
-export const env: EnvConfig = {
-  PORT: parseInt(process.env.PORT || '5000', 10),
-  NODE_ENV: process.env.NODE_ENV || 'development',
-  API_PREFIX: process.env.API_PREFIX || '/api/v1',
-  CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
-  SESSION_TIMEOUT_MINUTES: parseInt(process.env.SESSION_TIMEOUT_MINUTES || '30', 10),
-  MAX_CONCURRENT_SESSIONS: parseInt(process.env.MAX_CONCURRENT_SESSIONS || '100', 10)
+export type EnvConfig = z.infer<typeof envSchema>;
+
+export const validateEnv = (rawEnv: Record<string, unknown> = process.env): EnvConfig => {
+  const result = envSchema.safeParse(rawEnv);
+  if (!result.success) {
+    const errorDetails = result.error.format();
+    throw new Error(`Invalid environment configuration: ${JSON.stringify(errorDetails)}`);
+  }
+  return result.data;
 };
 
+// Safe mock defaults out-of-the-box: starts without any secrets
+export const env: EnvConfig = validateEnv();

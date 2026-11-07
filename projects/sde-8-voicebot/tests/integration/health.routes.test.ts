@@ -1,4 +1,4 @@
-import request from 'supertest';
+import { request } from '../helpers/test-request';
 import { app } from '../../src/app';
 
 describe('Health Routes Integration', () => {
@@ -19,4 +19,3 @@ describe('Health Routes Integration', () => {
     expect(res.body.error.code).toBe('NOT_FOUND');
   });
 });
-
