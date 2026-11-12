@@ -93,11 +93,18 @@ export class TestRequest {
           },
           (res) => {
             let text = '';
+            let sseDebounce: NodeJS.Timeout | undefined;
+
             res.on('data', (chunk) => {
               text += chunk.toString();
-              // For SSE streams, once received events, destroy request to complete
-              if (res.headers['content-type']?.includes('text/event-stream') && text.includes('data:')) {
-                req.destroy();
+              // For SSE streams, wait for all historical replay events to arrive before closing
+              if (res.headers['content-type']?.includes('text/event-stream')) {
+                if (sseDebounce) {
+                  clearTimeout(sseDebounce);
+                }
+                sseDebounce = setTimeout(() => {
+                  req.destroy();
+                }, 50);
               }
             });
 
@@ -105,6 +112,11 @@ export class TestRequest {
             const finalize = () => {
               if (finalized) return;
               finalized = true;
+
+              if (sseDebounce) {
+                clearTimeout(sseDebounce);
+                sseDebounce = undefined;
+              }
 
               try {
                 server.close();
