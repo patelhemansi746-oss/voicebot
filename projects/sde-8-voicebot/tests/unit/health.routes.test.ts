@@ -1,13 +1,18 @@
 import { Request, Response, NextFunction } from 'express';
 import healthRouter from '../../src/routes/health.routes';
 
-describe('Health Route Unit', () => {
-  it('should return 200 with status UP', () => {
-    let statusCode = 0;
-    let jsonOutput: any;
+describe('Health & Readiness Route Unit Tests', () => {
+  let statusCode = 0;
+  let jsonOutput: any;
+  let req: Request;
+  let res: Response;
+  let next: NextFunction;
 
-    const req = {} as Request;
-    const res = {
+  beforeEach(() => {
+    statusCode = 0;
+    jsonOutput = undefined;
+    req = {} as Request;
+    res = {
       status: (code: number) => {
         statusCode = code;
         return res;
@@ -17,8 +22,10 @@ describe('Health Route Unit', () => {
         return res;
       }
     } as unknown as Response;
-    const next = jest.fn() as NextFunction;
+    next = jest.fn() as NextFunction;
+  });
 
+  it('should return 200 with status UP on GET /', () => {
     const route = healthRouter.stack.find((layer) => layer.route?.path === '/');
     const handler = route?.route?.stack[0]?.handle;
 
@@ -30,6 +37,22 @@ describe('Health Route Unit', () => {
     expect(statusCode).toBe(200);
     expect(jsonOutput.success).toBe(true);
     expect(jsonOutput.data.status).toBe('UP');
+    expect(jsonOutput.data.uptime).toBeDefined();
+  });
+
+  it('should return 200 with status READY on GET /ready', () => {
+    const route = healthRouter.stack.find((layer) => layer.route?.path === '/ready');
+    const handler = route?.route?.stack[0]?.handle;
+
+    expect(handler).toBeDefined();
+    if (handler) {
+      handler(req, res, next);
+    }
+
+    expect(statusCode).toBe(200);
+    expect(jsonOutput.success).toBe(true);
+    expect(jsonOutput.message).toBe('Voicebot backend service is ready');
+    expect(jsonOutput.data.status).toBe('READY');
     expect(jsonOutput.data.uptime).toBeDefined();
   });
 });

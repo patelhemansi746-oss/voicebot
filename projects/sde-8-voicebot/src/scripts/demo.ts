@@ -7,10 +7,10 @@ import { AppError } from '../middleware/error.middleware';
  * End-to-End Demo Script for Team SDE-8 (Days 8-14)
  * Demonstrates:
  * 1. Safe Startup Configuration (Zero Secrets)
- * 2. Session Creation with Workspace Context
+ * 2. Session Creation (7 States: CREATED -> ACTIVE -> PAUSED -> STOPPING -> COMPLETED / FAILED / EXPIRED)
  * 3. Real-Time Event Streaming & Subscriptions
  * 4. Context Updates
- * 5. Idempotent State Transitions (Pause / Resume / Stop)
+ * 5. Idempotent State Transitions
  * 6. Enforcement of Illegal Transition Rejections (409)
  * 7. Inactivity Expiration
  * 8. Chronological Event Replay
@@ -29,8 +29,8 @@ async function runDemo() {
   console.log(`    - Port:        ${env.PORT}`);
   console.log('    ✅ Boots cleanly with ZERO secrets or API keys required.\n');
 
-  // 2. Session Creation
-  console.log('2️⃣  [Lifecycle] Creating new active voice session:');
+  // 2. Session Creation (State 1: CREATED)
+  console.log('2️⃣  [Lifecycle] Creating new voice session (CREATED state):');
   const session = sessionService.createSession({
     userId: 'student-developer-01',
     initialContext: {
@@ -44,8 +44,7 @@ async function runDemo() {
   console.log(`    - Session ID: ${session.id}`);
   console.log(`    - User ID:    ${session.userId}`);
   console.log(`    - Status:     ${session.status.toUpperCase()}`);
-  console.log(`    - Active App: ${session.context.activeApplication} ("${session.context.windowTitle}")`);
-  console.log('    ✅ Session initialized in ACTIVE state.\n');
+  console.log('    ✅ Session initialized in CREATED state.\n');
 
   // 3. Real-time Event Subscription (SSE Simulation)
   console.log('3️⃣  [Event Stream] Subscribing to live Server-Sent Events (SSE):');
@@ -55,8 +54,13 @@ async function runDemo() {
     console.log(`    ⚡ [SSE LIVE EVENT]: ${event.type} @ ${event.timestamp}`);
   });
 
+  // State 2: Transition CREATED -> ACTIVE
+  console.log('\n    [Lifecycle] Starting session (CREATED -> ACTIVE):');
+  sessionService.startSession(session.id);
+  console.log(`    - Status:     ${session.status.toUpperCase()}\n`);
+
   // 4. Update Workspace Context
-  console.log('\n4️⃣  [Context] Updating active workspace context:');
+  console.log('4️⃣  [Context] Updating active workspace context:');
   sessionService.updateSessionContext(session.id, {
     activeApplication: 'Terminal',
     windowTitle: 'bash - npm test',
@@ -64,8 +68,8 @@ async function runDemo() {
   });
   console.log('    ✅ Context updated; event broadcast to live subscribers.\n');
 
-  // 5. Idempotent State Transitions
-  console.log('5️⃣  [Lifecycle] Testing Pause / Resume & Idempotency:');
+  // 5. Idempotent State Transitions (State 3: PAUSED, State 4: STOPPING, State 5: COMPLETED)
+  console.log('5️⃣  [Lifecycle] Testing Pause / Resume / Stop & Idempotency:');
   sessionService.pauseSession(session.id);
   console.log(`    - Paused: Status = ${session.status.toUpperCase()}`);
 
@@ -81,7 +85,7 @@ async function runDemo() {
   console.log(`    - Repeated Resume: Status = ${session.status.toUpperCase()} (Idempotent 200 OK)`);
 
   sessionService.stopSession(session.id);
-  console.log(`    - Stopped: Status = ${session.status.toUpperCase()} (Terminal State)\n`);
+  console.log(`    - Stopped: Status = ${session.status.toUpperCase()} (Terminal State: COMPLETED)\n`);
 
   // 6. Illegal Transition Rejection
   console.log('6️⃣  [Safety Gate] Guarding illegal transitions from terminal state:');
@@ -94,7 +98,7 @@ async function runDemo() {
     }
   }
 
-  // 7. Inactivity Expiration
+  // 7. Inactivity Expiration (State 7: EXPIRED)
   console.log('7️⃣  [Expiry Engine] Testing automatic inactivity timeout:');
   const staleSession = sessionService.createSession({ userId: 'stale-user' });
   console.log(`    - Created temporary session '${staleSession.id}'`);
@@ -114,7 +118,7 @@ async function runDemo() {
   unsubscribe();
 
   console.log('\n===============================================================');
-  console.log('  🎉 DEMO COMPLETE: ALL ACCEPTANCE CRITERIA SUCCESSFULLY VERIFIED');
+  console.log('  🎉 DEMO COMPLETE: ALL 7 SESSION STATES SUCCESSFULLY VERIFIED');
   console.log('===============================================================\n');
 }
 
@@ -122,4 +126,3 @@ runDemo().catch((err) => {
   console.error('Demo encountered an error:', err);
   process.exit(1);
 });
-

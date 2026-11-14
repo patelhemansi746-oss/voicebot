@@ -1,16 +1,27 @@
-# Pull Request: W5 – Real Session Backend: Full Lifecycle, Event Streaming, Validation & Structured Logging
+# Pull Request: W5 – Real Session Backend: Full Lifecycle, Event Streaming, Validation, Request IDs & Readiness
 
 **Team:** SDE 8  
-**Feature Branch:** `team/sde-8-voicebot` (or `jahnavi` -> `team/sde-8-voicebot`)  
+**Feature Branch:** `jahnavi` -> `team/sde-8-voicebot` (or PR #3)  
 **Folder:** `projects/sde-8-voicebot/`  
-**Milestone:** Days 8–14 (Core Implementation)  
+**Milestone:** Week 1 & Week 2 Complete (Core Implementation & Hardening)  
 **Status:** Ready for Review  
 
 ---
 
 ## 📌 Executive Summary
 
-This PR completes the **W5 - Backend & Sessions** core implementation (Days 8–14) for the **Academia - AI Voice Co-Pilot**. It upgrades the initial skeleton into a production-grade session backend with full state machine lifecycle management, real-time Server-Sent Events (SSE) streaming, strict input validation, safe startup configuration with mock defaults, and structured logging with correlation IDs.
+This PR completes both **Week 1** and **Week 2** acceptance criteria for the **Academia - AI Voice Co-Pilot** backend:
+1. **Readiness Probe (`GET /ready` & `GET /health/ready`)**: Production readiness health endpoint returning HTTP 200 with service uptime alongside the liveness endpoint (`GET /health`).
+2. **Typed Error Envelope**: Adheres to the exact spec error envelope containing `code`, `message_safe_for_user`, `retryable`, `correlation_id`, and `details_redacted`.
+3. **Request ID Middleware**: Ingestion and generation of `X-Request-ID` and `X-Correlation-Id` headers on every incoming request and outgoing response.
+4. **7-State Session State Machine**: Formally enforces the 7 required states:
+   - `created` ➔ `active` ➔ `paused` ➔ `stopping` ➔ `completed` / `failed` / `expired`
+   - Full idempotency on state transitions (`start`, `pause`, `resume`, `stop`).
+   - Strict transition guards: illegal operations on terminal states (`completed`, `failed`, `expired`) rejected with HTTP 409 `ILLEGAL_TRANSITION`.
+5. **Real-time Event Streaming (SSE)**: `GET /api/v1/sessions/:id/events` with chronological replay of ordered events.
+6. **Payload Limits & Zod Validation**: 100kb payload caps (413 `PAYLOAD_TOO_LARGE`) and strict schema checks (400 `VALIDATION_ERROR`).
+7. **Zero-Secret Mock Startup**: Validated environment configuration running with safe mock defaults out-of-the-box.
+8. **Automated Test Coverage**: **77 automated tests** across **14 test suites** passing with **95.09% statement coverage** and **80.52% branch coverage** (exceeding the 80% threshold).
 
 ---
 
@@ -18,51 +29,48 @@ This PR completes the **W5 - Backend & Sessions** core implementation (Days 8–
 
 | Acceptance Criterion | Implementation Details | Verification Status |
 |:---|:---|:---:|
-| **1. Session Lifecycle & Idempotency**<br>Sessions support create / pause / resume / stop / expiry; illegal transitions rejected; repeated commands are idempotent | Implemented in `SessionService` (`createSession`, `pauseSession`, `resumeSession`, `stopSession`, `checkAndExpireSessions`). Repeated pause/resume/stop returns 200 with existing session state. Transitions from terminal states (`stopped`, `expired`) throw `409 ILLEGAL_TRANSITION`. | ✅ **VERIFIED**<br>(Unit & Integration tests pass) |
-| **2. Ordered Event Streaming & Limits**<br>Events stream in order; invalid requests rejected with typed error envelope; payload size limits enforced | SSE endpoint `GET /api/v1/sessions/:id/events` streams real-time events and replays chronological event history. Invalid requests caught by Zod return typed 400 `VALIDATION_ERROR` envelope. Body parser rejects requests >`MAX_PAYLOAD_LIMIT` (100kb) with typed 413 `PAYLOAD_TOO_LARGE`. | ✅ **VERIFIED**<br>(Unit & Integration tests pass) |
-| **3. Safe Startup Configuration**<br>Startup config is validated; safe mock defaults; app starts with no secrets | `validateEnv()` in `src/config/env.ts` parses environment variables using Zod schemas. Default configuration runs in safe mock mode without any required secrets or API keys. | ✅ **VERIFIED**<br>(Boots cleanly out-of-the-box) |
-| **4. Structured Logging & Redaction**<br>Logs are structured, carry correlation IDs and contain no sensitive payloads | `loggerMiddleware` attaches `X-Correlation-Id` to all requests and responses, emitting structured JSON with duration, method, path, and status code. `sanitizePayload()` automatically strips sensitive fields (`password`, `token`, `apiKey`, `secret`, `auth`) with `[REDACTED]`. | ✅ **VERIFIED**<br>(100% covered in tests) |
-| **5. API Tests & PR Output**<br>API tests pass; PR includes test output; demo given | 62 automated tests pass across 13 test suites with **98.57% statement coverage** and **88.13% branch coverage**, surpassing the 80% threshold. | ✅ **VERIFIED**<br>(13/13 suites passing) |
+| **1. 7 Session States & Lifecycle Transitions**<br>Use required 7 states: `created`, `active`, `paused`, `stopping`, `completed`, `failed`, `expired`. Repeated commands idempotent; terminal transitions guarded. | Implemented in `SessionService` and `SessionController`. `createSession` initializes `created` state. Transitions to `active` via `start`/`resume`, `paused` via `pause`, `stopping` ➔ `completed` via `stop`, `failed` via `fail`, and `expired` via inactivity timeout. Terminal states reject invalid transitions with 409 `ILLEGAL_TRANSITION`. | ✅ **VERIFIED**<br>(Unit & Integration tests pass) |
+| **2. Readiness & Liveness Probes**<br>Liveness probe at `/health`; readiness probe at `/ready` | Mounted `GET /ready` and `GET /health/ready` returning 200 OK with `{ status: 'READY', uptime: ... }`. `GET /health` returns 200 OK with `{ status: 'UP', uptime: ... }`. | ✅ **VERIFIED**<br>(Unit & Integration tests pass) |
+| **3. Typed Error Envelope**<br>Errors must output spec fields: `code`, `message_safe_for_user`, `retryable`, `correlation_id`, `details_redacted` | `errorHandler` middleware standardizes all error responses with `code`, `message_safe_for_user`, `retryable`, `correlation_id`, and `details_redacted` (sensitive keys automatically masked). | ✅ **VERIFIED**<br>(Unit & Integration tests pass) |
+| **4. Request ID & Correlation ID Tracking**<br>Attach `X-Request-ID` and `X-Correlation-Id` to all requests and responses | Dedicated `requestIdMiddleware` extracts or generates UUIDv4 request IDs and correlation IDs, setting response headers on every request. | ✅ **VERIFIED**<br>(Unit & Integration tests pass) |
+| **5. Ordered Event Streaming & Limits**<br>SSE streams ordered events; payload limits enforced | SSE endpoint `GET /api/v1/sessions/:id/events` streams events and replays chronological event history. Body parser rejects requests >`MAX_PAYLOAD_LIMIT` (100kb) with typed 413 `PAYLOAD_TOO_LARGE`. | ✅ **VERIFIED**<br>(Unit & Integration tests pass) |
+| **6. Safe Startup Configuration**<br>Validated startup config; safe mock defaults; boots with zero secrets | `validateEnv()` in `src/config/env.ts` parses environment variables using Zod schemas. Default configuration runs in safe mock mode without any required secrets or API keys. | ✅ **VERIFIED**<br>(Boots cleanly out-of-the-box) |
+| **7. Test Suite & Coverage Threshold**<br>All tests pass; PR includes passing test output | 77 automated tests pass across 14 test suites with **95.09% statement coverage** and **80.52% branch coverage**, surpassing the 80% threshold. | ✅ **VERIFIED**<br>(14/14 suites passing) |
 
 ---
 
-## 🏗️ Architecture & Interaction Flow
+## 🏗️ State Machine Flow (7 States)
 
 ```mermaid
-flowchart TD
-    Client[Voice Client / Workspace UI] -->|HTTP Request / SSE Connection| Gateway[Express App Pipeline]
-    
-    subgraph Middlewares [Security & Observability Stack]
-        Gateway --> Logger[loggerMiddleware: Correlation ID & Sanitized Structured Logs]
-        Logger --> CORS[corsMiddleware: Allowed Origins]
-        CORS --> Parser[express.json: 100kb MAX_PAYLOAD_LIMIT]
-        Parser --> Validator[validateBody: Zod Schema Validation]
-    end
+stateDiagram-v2
+    [*] --> created: createSession()
+    created --> active: startSession() / resumeSession()
+    created --> stopping: stopSession()
+    created --> failed: failSession()
+    created --> expired: Inactivity Timeout
 
-    subgraph ControllersAndRoutes [API Routing]
-        Validator -->|Route Handler| SessionController[Session Controller]
-        SessionController -->|Create / Pause / Resume / Stop / Expire| SessionService[Session Service]
-        SessionController -->|GET /events| EventStream[SSE Event Stream & Replay]
-    end
+    active --> paused: pauseSession()
+    active --> stopping: stopSession()
+    active --> failed: failSession()
+    active --> expired: Inactivity Timeout
+    active --> active: resumeSession() [idempotent]
 
-    subgraph StateMachine [Session Lifecycle State Machine]
-        SessionService --> ACTIVE[ACTIVE]
-        ACTIVE -->|pause| PAUSED[PAUSED]
-        PAUSED -->|resume| ACTIVE
-        ACTIVE -->|stop| STOPPED[STOPPED - Terminal]
-        PAUSED -->|stop| STOPPED
-        ACTIVE -->|timeout| EXPIRED[EXPIRED - Terminal]
-        PAUSED -->|timeout| EXPIRED
-        STOPPED -.->|Illegal Transition| Error409[409 ILLEGAL_TRANSITION]
-        EXPIRED -.->|Illegal Transition| Error409
-    end
+    paused --> active: resumeSession()
+    paused --> stopping: stopSession()
+    paused --> failed: failSession()
+    paused --> expired: Inactivity Timeout
+    paused --> paused: pauseSession() [idempotent]
 
-    subgraph ErrorHandling [Global Error Handling]
-        Error409 --> ErrorMiddleware[Global errorHandler]
-        Validator -->|Schema Mismatch| ErrorMiddleware
-        Parser -->|Payload > Limit| ErrorMiddleware
-        ErrorMiddleware --> Envelope[Typed Error Envelope Response]
-    end
+    stopping --> completed: Teardown Complete
+    stopping --> failed: Teardown Failure
+
+    completed --> [*]: Terminal State
+    failed --> [*]: Terminal State
+    expired --> [*]: Terminal State
+
+    completed --> 409: pause / resume / start (ILLEGAL_TRANSITION)
+    failed --> 409: pause / resume / start (ILLEGAL_TRANSITION)
+    expired --> 409: pause / resume / start (ILLEGAL_TRANSITION)
 ```
 
 ---
@@ -70,77 +78,49 @@ flowchart TD
 ## 🧪 Automated Test Results & Code Coverage
 
 ```text
+PASS tests/unit/request-id.middleware.test.ts
+PASS tests/unit/session.controller.test.ts
+PASS tests/unit/validate.middleware.test.ts
 PASS tests/unit/launcher.config.test.ts
 PASS tests/unit/env.config.test.ts
-PASS tests/unit/error.middleware.test.ts
-PASS tests/smoke/launcher.test.ts
-PASS tests/unit/health.routes.test.ts
 PASS tests/unit/cors.middleware.test.ts
-PASS tests/unit/validate.middleware.test.ts
-PASS tests/unit/logger.middleware.test.ts
-PASS tests/unit/session.controller.test.ts
 PASS tests/unit/session.service.test.ts
-PASS tests/unit/app.test.ts
-PASS tests/integration/session.routes.test.ts
+PASS tests/unit/logger.middleware.test.ts
+PASS tests/smoke/launcher.test.ts
+PASS tests/unit/error.middleware.test.ts
 PASS tests/integration/health.routes.test.ts
+PASS tests/integration/session.routes.test.ts
+PASS tests/unit/health.routes.test.ts
+PASS tests/unit/app.test.ts
 
--------------------------|---------|----------|---------|---------|-------------------
-File                     | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s 
--------------------------|---------|----------|---------|---------|-------------------
-All files                |   98.57 |    88.13 |   95.45 |   98.82 |                   
- src                     |     100 |      100 |     100 |     100 |                   
-  app.ts                 |     100 |      100 |     100 |     100 |                   
- src/config              |     100 |    83.33 |     100 |     100 |                   
-  env.ts                 |     100 |       75 |     100 |     100 | 16                
-  launcher.config.ts     |     100 |     87.5 |     100 |     100 | 21                
- src/controllers         |    98.8 |      100 |   91.66 |    98.8 |                   
-  session.controller.ts  |    98.8 |      100 |   91.66 |    98.8 | 253               
- src/middleware          |   96.34 |    86.36 |    90.9 |   97.33 |                   
-  cors.middleware.ts     |     100 |      100 |     100 |     100 |                   
-  error.middleware.ts    |     100 |    92.85 |     100 |     100 | 40                
-  logger.middleware.ts   |   93.33 |     82.6 |      75 |   96.29 | 35                
-  validate.middleware.ts |    92.3 |       50 |     100 |    90.9 | 18                
- src/routes              |     100 |      100 |     100 |     100 |                   
-  health.routes.ts       |     100 |      100 |     100 |     100 |                   
-  session.routes.ts      |     100 |      100 |     100 |     100 |                   
- src/services            |   99.12 |    88.46 |     100 |   99.11 |                   
-  session.service.ts     |   99.12 |    88.46 |     100 |   99.11 | 53                
- src/types               |     100 |      100 |     100 |     100 |                   
-  session.types.ts       |     100 |      100 |     100 |     100 |                   
--------------------------|---------|----------|---------|---------|-------------------
-
-Test Suites: 13 passed, 13 total
-Tests:       62 passed, 62 total
+---------------------------|---------|----------|---------|---------|------------------------------------------------
+File                       | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s                              
+---------------------------|---------|----------|---------|---------|------------------------------------------------
+All files                  |   95.09 |    80.52 |   98.03 |   94.97 |                                                
+ src                       |     100 |      100 |     100 |     100 |                                                
+  app.ts                   |     100 |      100 |     100 |     100 |                                                
+ src/config                |     100 |    83.33 |     100 |     100 |                                                
+  env.ts                   |     100 |       75 |     100 |     100 | 16                                             
+  launcher.config.ts       |     100 |     87.5 |     100 |     100 | 21                                             
+ src/controllers           |   96.03 |       90 |    92.3 |   96.03 |                                                
+  session.controller.ts    |   96.03 |       90 |    92.3 |   96.03 | 107,211,300-301                                
+ src/middleware            |   99.18 |    82.55 |     100 |   99.13 |                                                
+  cors.middleware.ts       |     100 |      100 |     100 |     100 |                                                
+  error.middleware.ts      |     100 |     72.5 |     100 |     100 | 48-61,75,86-87                                 
+  logger.middleware.ts     |     100 |    88.88 |     100 |     100 | 83-91,96                                       
+  request-id.middleware.ts |     100 |      100 |     100 |     100 |                                                
+  validate.middleware.ts   |    92.3 |       50 |     100 |    90.9 | 18                                             
+ src/routes                |     100 |      100 |     100 |     100 |                                                
+  health.routes.ts         |     100 |      100 |     100 |     100 |                                                
+  session.routes.ts        |     100 |      100 |     100 |     100 |                                                
+ src/services              |    89.2 |    75.64 |     100 |   89.14 |                                                
+  session.service.ts       |    89.2 |    75.64 |     100 |   89.14 | 59,136,286,294,318,322,326,343-347,352-361,440 
+ src/types                 |     100 |      100 |     100 |     100 |                                                
+  session.types.ts         |     100 |      100 |     100 |     100 |                                                
+---------------------------|---------|----------|---------|---------|------------------------------------------------
+Test Suites: 14 passed, 14 total
+Tests:       77 passed, 77 total
 Snapshots:   0 total
+Time:        42.086 s
+Ran all test suites.
 ```
-
----
-
-## 🚀 How to Run & Verify
-
-1. **Install dependencies:**
-   ```bash
-   cd projects/sde-8-voicebot
-   npm install
-   ```
-
-2. **Run tests with coverage:**
-   ```bash
-   npm test
-   ```
-
-3. **Build TypeScript:**
-   ```bash
-   npm run build
-   ```
-
-4. **Start the backend service:**
-   ```bash
-   npm start
-   ```
-
-5. **Start via Service Launcher orchestrator:**
-   ```bash
-   npm run launcher
-   ```
-

@@ -1,24 +1,26 @@
-# SDE-8 Voicebot: Backend & Sessions (Days 8–14: Core Implementation)
+# SDE-8 Voicebot: Backend & Sessions (Week 1 & Week 2 Implementation)
 
-> **Task Assignment:** W5 – Backend & Sessions: Days 8–14 (Core implementation)  
+> **Task Assignment:** W5 – Backend & Sessions: Week 1 & Week 2 (Core implementation & Hardening)  
 > **Team:** SDE 8  
 > **Project Directory:** `projects/sde-8-voicebot/`  
-> **Target Git Branch:** `team/sde-8-voicebot` (or feature branch off it)  
-> **Repository:** `https://github.com/patelhemansi746-oss/voicebot` (or `https://github.com/Yashuudevang/acd_voicebot`)
+> **Target Git Branch:** `team/sde-8-voicebot` (or `jahnavi`)  
+> **Repository:** `https://github.com/patelhemansi746-oss/voicebot` (or `jahnavipatil11/VOICEBOT-AI-CO-POLIT`)
 
 ---
 
 ## 📖 Overview
 
-This release completes the **real session backend** for the **Academia - AI Voice Co-Pilot** platform (Team SDE-8 Days 8–14). It expands the foundation into a production-grade session engine with:
-- **Full Session Lifecycle State Machine**: `active`, `paused`, `stopped`, and `expired`.
-- **Strict Transition Enforcement**: Rejects illegal transitions with typed 409 `ILLEGAL_TRANSITION` error envelope.
-- **Idempotent Commands**: Repeated pause, resume, and stop operations return the current session state safely without errors.
-- **Inactivity Session Expiry**: Automated expiration tracking for stale sessions.
+This release completes both **Week 1** and **Week 2** requirements for the **Academia - AI Voice Co-Pilot** platform (Team SDE-8). It features:
+- **7-State Session Lifecycle State Machine**: Formal state transitions across `created`, `active`, `paused`, `stopping`, `completed`, `failed`, and `expired`.
+- **Strict Transition Enforcement**: Rejects illegal transitions on terminal states with typed 409 `ILLEGAL_TRANSITION` error envelope.
+- **Idempotent Commands**: Repeated `start`, `pause`, `resume`, and `stop` operations return the current session state safely without errors.
+- **Readiness & Liveness Endpoints**: `GET /ready` (and `GET /health/ready`) for container readiness probes, and `GET /health` for liveness probes.
+- **Typed Error Envelope**: Adheres to the specification with `code`, `message_safe_for_user`, `retryable`, `correlation_id`, and `details_redacted`.
+- **Request ID & Correlation ID Tracking**: Middleware sets `X-Request-ID` and `X-Correlation-Id` on all requests and responses.
 - **Real-Time Event Streaming (SSE)**: Server-Sent Events endpoint (`GET /api/v1/sessions/:id/events`) streaming ordered lifecycle and context events with historical replay.
 - **Payload Size Limits & Zod Validation**: Enforces strict request body limits, rejecting oversized payloads with 413 `PAYLOAD_TOO_LARGE`.
 - **Zero-Secret Safe Mock Startup**: Validated startup config using Zod with safe mock defaults—boots immediately with no external keys or secrets needed.
-- **Structured JSON Logging with Correlation IDs**: Every request tracks an `x-correlation-id`, outputs structured JSON logs, and automatically redacts sensitive data (passwords, tokens, API keys).
+- **Structured JSON Logging with Redaction**: Structured JSON logs automatically scrub sensitive data (passwords, tokens, API keys).
 
 ---
 
@@ -34,7 +36,7 @@ projects/sde-8-voicebot/
 ├── README.md                          # Complete documentation & API contracts
 ├── tsconfig.json                      # Strict TypeScript configuration
 ├── src/
-│   ├── app.ts                         # Express app pipeline with payload limits & correlation logging
+│   ├── app.ts                         # Express app pipeline with payload limits, request ID & error handling
 │   ├── server.ts                      # Server entrypoint with graceful shutdown
 │   ├── config/
 │   │   ├── env.ts                     # Zod-validated startup config with safe mock defaults
@@ -44,142 +46,120 @@ projects/sde-8-voicebot/
 │   ├── middleware/
 │   │   ├── cors.middleware.ts         # CORS policy & headers
 │   │   ├── error.middleware.ts        # Typed error envelope & AppError handling
-│   │   ├── logger.middleware.ts       # Structured JSON logging, correlation IDs & sensitive data redaction
+│   │   ├── logger.middleware.ts       # Structured JSON logging & sensitive data redaction
+│   │   ├── request-id.middleware.ts   # X-Request-ID & X-Correlation-Id generation/tracking
 │   │   └── validate.middleware.ts     # Zod schema validation middleware
 │   ├── routes/
-│   │   ├── health.routes.ts           # GET /health monitoring endpoint
+│   │   ├── health.routes.ts           # GET /health & GET /ready monitoring endpoints
 │   │   └── session.routes.ts          # REST endpoints & SSE stream
 │   ├── scripts/
+│   │   ├── demo.ts                    # End-to-end demo script
 │   │   └── launcher.ts                # Service orchestration tool with health check polling
 │   ├── services/
-│   │   └── session.service.ts         # Lifecycle state machine, event store & inactivity expiry
+│   │   └── session.service.ts         # 7-state lifecycle state machine, event store & inactivity expiry
 │   └── types/
 │       ├── common.types.ts            # Typed error envelope & API response definitions
 │       └── session.types.ts           # Session lifecycle models, event definitions & Zod schemas
 └── tests/
+    ├── helpers/
+    │   └── test-request.ts            # High-performance in-memory named pipe HTTP testing harness
     ├── unit/
     │   ├── app.test.ts                # App factory & middleware integration
     │   ├── cors.middleware.test.ts    # CORS origin filtering & rejection
     │   ├── env.config.test.ts         # Startup config validation & safe defaults
-    │   ├── error.middleware.test.ts   # Typed error envelope & 413 payload limits
-    │   ├── health.routes.test.ts      # Health check handler
+    │   ├── error.middleware.test.ts   # Typed error envelope & payload limits
+    │   ├── health.routes.test.ts      # Health & readiness handlers
     │   ├── launcher.config.test.ts    # Launcher configuration verification
-    │   ├── logger.middleware.test.ts  # Correlation ID tracking & sensitive redaction
+    │   ├── logger.middleware.test.ts  # Structured logging & sensitive redaction
+    │   ├── request-id.middleware.test.ts # Request ID & correlation ID middleware tests
     │   ├── session.controller.test.ts # Session controller methods & SSE stream
-    │   ├── session.service.test.ts    # Lifecycle state machine, idempotency, expiry & events
+    │   ├── session.service.test.ts    # 7-state lifecycle machine, idempotency, expiry & events
     │   └── validate.middleware.test.ts# Zod input validation
+    ├── integration/
+    │   ├── health.routes.test.ts      # Route integration for /health, /ready, request IDs & errors
+    │   └── session.routes.test.ts     # Route integration for 7 states & SSE replay
     └── smoke/
         └── launcher.test.ts           # Launcher pre-flight & orchestrator smoke tests
 ```
 
 ---
 
-## 🔄 State Machine & Transition Rules
+## 🔄 7-State Lifecycle State Machine
 
 ```
-       [create]
-          │
-          ▼
-     ┌─────────┐   pause    ┌─────────┐
-     │ ACTIVE  ├───────────►│ PAUSED  │
-     │         │◄───────────┤         │
-     └────┬────┘   resume   └────┬────┘
-          │                      │
-     stop │                 stop │
-          ▼                      ▼
-     ┌────────────────────────────────┐
-     │       STOPPED (Terminal)       │
-     └────────────────────────────────┘
-          ▲
-          │ (Inactivity timeout)
-     ┌────┴───────────────────────────┐
-     │       EXPIRED (Terminal)       │
-     └────────────────────────────────┘
+              [createSession]
+                    │
+                    ▼
+               ┌─────────┐
+               │ CREATED │
+               └────┬────┘
+                    │ start / resume
+                    ▼
+     ┌─────────┐  pause   ┌─────────┐
+     │ ACTIVE  ├─────────►│ PAUSED  │
+     │         │◄─────────┤         │
+     └────┬────┘  resume  └────┬────┘
+          │                    │
+     stop │               stop │
+          ▼                    ▼
+     ┌──────────────────────────────┐
+     │           STOPPING           │
+     └──────────────┬───────────────┘
+                    │ teardown
+                    ▼
+     ┌──────────────────────────────┐
+     │     COMPLETED (Terminal)     │
+     └──────────────────────────────┘
+
+     * Any non-terminal state ──► FAILED (Terminal) on fatal error
+     * Any non-terminal state ──► EXPIRED (Terminal) on inactivity timeout
 ```
 
 - **Allowed Transitions**:
-  - `ACTIVE` ➔ `PAUSED`, `STOPPED`, `EXPIRED`
-  - `PAUSED` ➔ `ACTIVE` (resume), `STOPPED`, `EXPIRED`
-- **Idempotency**:
-  - `pause` on `PAUSED` ➔ Returns 200 with existing session (no error).
-  - `resume` on `ACTIVE` ➔ Returns 200 with existing session (no error).
-  - `stop` on `STOPPED` ➔ Returns 200 with existing session (no error).
-- **Illegal Transitions**:
-  - Resuming or pausing a `STOPPED` or `EXPIRED` session is rejected with **HTTP 409 `ILLEGAL_TRANSITION`**.
-  - Updating context on a terminal session is rejected with **HTTP 409 `ILLEGAL_TRANSITION`**.
+  - `created` ➔ `active`, `stopping`, `failed`, `expired`
+  - `active` ➔ `paused`, `stopping`, `failed`, `expired`
+  - `paused` ➔ `active`, `stopping`, `failed`, `expired`
+  - `stopping` ➔ `completed`, `failed`
+- **Terminal States**: `completed`, `failed`, `expired`. Any transition attempt from a terminal state throws `409 ILLEGAL_TRANSITION`.
 
 ---
 
-## 📡 API Specification & Typed Error Envelope
+## 🛡️ Standard Typed Error Envelope
 
-### Standard Response Envelope
-```json
-{
-  "success": true,
-  "message": "Descriptive message",
-  "data": {},
-  "timestamp": "2026-11-02T13:40:00.000Z"
-}
-```
-
-### Standard Error Envelope
 ```json
 {
   "success": false,
-  "message": "Cannot resume session '123' in terminal status 'stopped'",
+  "message": "Human readable safe message",
   "error": {
-    "code": "ILLEGAL_TRANSITION",
-    "details": null
+    "code": "VALIDATION_ERROR",
+    "message_safe_for_user": "Human readable safe message",
+    "retryable": false,
+    "correlation_id": "c138b301-3dd8-4107-88d4-539424c883e0",
+    "details_redacted": {
+      "field": "userId"
+    }
   },
-  "timestamp": "2026-11-02T13:40:00.000Z"
+  "timestamp": "2026-11-14T13:14:04.742Z"
 }
 ```
 
-### Endpoints Summary
+---
+
+## 🌐 API Reference
 
 | Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/health` | Service health status and uptime |
-| `POST` | `/api/v1/sessions` | Create a new active voice session |
-| `GET` | `/api/v1/sessions` | List active sessions (supports `?page=1&limit=20`) |
-| `GET` | `/api/v1/sessions/:id` | Get details and active context of a session |
-| `POST` | `/api/v1/sessions/:id/pause` | Pause an active session (**Idempotent**) |
-| `POST` | `/api/v1/sessions/:id/resume` | Resume a paused session (**Idempotent**) |
-| `POST` | `/api/v1/sessions/:id/stop` | Stop a session (**Idempotent**) |
-| `PATCH` | `/api/v1/sessions/:id/context` | Update active window / screen context |
-| `DELETE` | `/api/v1/sessions/:id` | Delete session and clean up memory |
-| `GET` | `/api/v1/sessions/:id/events` | **Server-Sent Events (SSE)** real-time stream with historical replay |
-
----
-
-## 🧪 Test Suite & Verified Coverage
-
-Run tests from `projects/sde-8-voicebot`:
-```bash
-npm test
-```
-
-### Test Coverage Results:
-- **Statements:** `98.57%` *(Target: >80%)*
-- **Branches:** `88.13%` *(Target: >80%)*
-- **Functions:** `95.45%` *(Target: >80%)*
-- **Lines:** `98.82%` *(Target: >80%)*
-- **Passing Tests:** **62 passing tests across 13 test suites (100% passing)**
-
----
-
-## 🔒 Security & Privacy Features
-- **App starts with no secrets**: Default mock mode runs zero external credentials.
-- **Sensitive payload redaction**: Structured JSON logs automatically scrub passwords, tokens, API keys, and authorization headers (`[REDACTED]`).
-- **Correlation IDs**: Header `X-Correlation-Id` is attached to all HTTP requests and responses for end-to-end tracing.
-- **Payload size limits**: Rejects payloads exceeding `100kb` with typed 413 `PAYLOAD_TOO_LARGE`.
-
----
-
-## 📋 Acceptance Criteria Checklist
-
-- [x] **Sessions support create / pause / resume / stop / expiry; illegal transitions rejected; repeated commands are idempotent**
-- [x] **Events stream in order (SSE); invalid requests rejected with typed error envelope; payload size limits enforced**
-- [x] **Startup config is validated; safe mock defaults; app starts with no secrets**
-- [x] **Logs are structured, carry correlation IDs and contain no sensitive payloads**
-- [x] **API tests pass (>98% coverage); PR includes test output; demo ready**
+|:---|:---|:---|
+| `GET` | `/health` | Service liveness probe (`UP`) |
+| `GET` | `/ready` | Service readiness probe (`READY`) |
+| `GET` | `/health/ready` | Readiness probe under health router |
+| `POST` | `/api/v1/sessions` | Create new voice session (`created` status) |
+| `GET` | `/api/v1/sessions` | List sessions with pagination |
+| `GET` | `/api/v1/sessions/:id` | Get session details |
+| `POST` | `/api/v1/sessions/:id/start` | Start created session (`active` status) |
+| `POST` | `/api/v1/sessions/:id/pause` | Pause active session (`paused` status, idempotent) |
+| `POST` | `/api/v1/sessions/:id/resume` | Resume paused session (`active` status, idempotent) |
+| `POST` | `/api/v1/sessions/:id/stop` | Stop session (`stopping` ➔ `completed`, idempotent) |
+| `POST` | `/api/v1/sessions/:id/fail` | Fail session (`failed` status) |
+| `PATCH` | `/api/v1/sessions/:id/context` | Update desktop workspace context |
+| `DELETE` | `/api/v1/sessions/:id` | Delete session & event history |
+| `GET` | `/api/v1/sessions/:id/events` | SSE event stream with ordered historical replay |

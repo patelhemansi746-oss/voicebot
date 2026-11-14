@@ -1,6 +1,10 @@
 export interface ApiErrorEnvelope {
   code: string;
-  details?: unknown;
+  message_safe_for_user: string;
+  retryable: boolean;
+  correlation_id: string;
+  details_redacted?: unknown;
+  details?: unknown; // Retained for backwards compatibility
 }
 
 export interface ApiResponse<T = unknown> {
@@ -19,6 +23,7 @@ export interface PaginationParams {
 declare global {
   namespace Express {
     interface Request {
+      requestId?: string;
       correlationId?: string;
     }
   }

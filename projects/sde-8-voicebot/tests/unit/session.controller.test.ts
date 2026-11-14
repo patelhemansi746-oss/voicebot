@@ -31,7 +31,8 @@ describe('SessionController Unit Tests', () => {
         return mockRes;
       }),
       flushHeaders: jest.fn(),
-      write: jest.fn()
+      write: jest.fn(),
+      end: jest.fn()
     };
     mockNext = jest.fn();
   });
@@ -40,7 +41,7 @@ describe('SessionController Unit Tests', () => {
     sessionService.clearAllSessions();
   });
 
-  it('createSession should return 201 with created session', async () => {
+  it('createSession should return 201 with created session in CREATED state', async () => {
     mockReq = {
       body: { userId: 'intern-01' }
     };
@@ -50,6 +51,7 @@ describe('SessionController Unit Tests', () => {
     expect(statusOutput).toBe(201);
     expect(jsonOutput.success).toBe(true);
     expect(jsonOutput.data.userId).toBe('intern-01');
+    expect(jsonOutput.data.status).toBe(SessionStatus.CREATED);
   });
 
   it('createSession should forward error to next on failure', async () => {
@@ -61,6 +63,16 @@ describe('SessionController Unit Tests', () => {
     mockReq = { body: {} };
     await sessionController.createSession(mockReq as Request, mockRes as Response, mockNext);
     expect(mockNext).toHaveBeenCalledWith(error);
+  });
+
+  it('startSession should start a created session and return 200 with ACTIVE status', async () => {
+    const created = sessionService.createSession({ userId: 'u1' });
+    mockReq = { params: { id: created.id } };
+
+    await sessionController.startSession(mockReq as Request, mockRes as Response, mockNext);
+
+    expect(statusOutput).toBe(200);
+    expect(jsonOutput.data.status).toBe(SessionStatus.ACTIVE);
   });
 
   it('getAllSessions should return paginated list', async () => {
@@ -101,8 +113,9 @@ describe('SessionController Unit Tests', () => {
     expect(mockNext).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 404 }));
   });
 
-  it('pauseSession should pause session and catch errors', async () => {
+  it('pauseSession should pause active session and catch errors', async () => {
     const created = sessionService.createSession({ userId: 'u1' });
+    sessionService.startSession(created.id);
     mockReq = { params: { id: created.id } };
 
     await sessionController.pauseSession(mockReq as Request, mockRes as Response, mockNext);
@@ -118,6 +131,7 @@ describe('SessionController Unit Tests', () => {
 
   it('resumeSession should resume session and catch errors', async () => {
     const created = sessionService.createSession({ userId: 'u1' });
+    sessionService.startSession(created.id);
     sessionService.pauseSession(created.id);
     mockReq = { params: { id: created.id } };
 
@@ -132,14 +146,15 @@ describe('SessionController Unit Tests', () => {
     expect(mockNext).toHaveBeenCalled();
   });
 
-  it('stopSession should stop session and catch errors', async () => {
+  it('stopSession should stop session into COMPLETED and catch errors', async () => {
     const created = sessionService.createSession({ userId: 'u1' });
+    sessionService.startSession(created.id);
     mockReq = { params: { id: created.id } };
 
     await sessionController.stopSession(mockReq as Request, mockRes as Response, mockNext);
 
     expect(statusOutput).toBe(200);
-    expect(jsonOutput.data.status).toBe(SessionStatus.STOPPED);
+    expect(jsonOutput.data.status).toBe(SessionStatus.COMPLETED);
 
     // Stop on non-existent
     mockReq = { params: { id: 'invalid-id' } };
@@ -147,8 +162,19 @@ describe('SessionController Unit Tests', () => {
     expect(mockNext).toHaveBeenCalled();
   });
 
+  it('failSession should transition session into FAILED and catch errors', async () => {
+    const created = sessionService.createSession({ userId: 'u1' });
+    mockReq = { params: { id: created.id }, body: { reason: 'Test fail' } };
+
+    await sessionController.failSession(mockReq as Request, mockRes as Response, mockNext);
+
+    expect(statusOutput).toBe(200);
+    expect(jsonOutput.data.status).toBe(SessionStatus.FAILED);
+  });
+
   it('updateContext should update session context and catch errors', async () => {
     const created = sessionService.createSession({ userId: 'u1' });
+    sessionService.startSession(created.id);
     mockReq = {
       params: { id: created.id },
       body: { windowTitle: 'Editor' }
@@ -179,6 +205,7 @@ describe('SessionController Unit Tests', () => {
 
   it('streamSessionEvents should set SSE headers, replay history and handle client close', async () => {
     const session = sessionService.createSession({ userId: 'stream-user' });
+    sessionService.startSession(session.id);
     sessionService.pauseSession(session.id);
 
     let closeHandler: () => void = () => {};

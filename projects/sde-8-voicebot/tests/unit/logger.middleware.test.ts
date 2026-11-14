@@ -34,21 +34,28 @@ describe('Logger Middleware & Sensitive Payload Redaction', () => {
     consoleSpy.mockRestore();
   });
 
-  it('should generate a correlation ID and set X-Correlation-Id response header', () => {
+  it('should generate a correlation ID and request ID and set response headers', () => {
     loggerMiddleware(mockRequest as Request, mockResponse as Response, mockNext);
 
     expect(mockRequest.correlationId).toBeDefined();
+    expect(mockRequest.requestId).toBeDefined();
     expect(mockResponse.setHeader).toHaveBeenCalledWith('X-Correlation-Id', mockRequest.correlationId);
+    expect(mockResponse.setHeader).toHaveBeenCalledWith('X-Request-ID', mockRequest.requestId);
     expect(mockNext).toHaveBeenCalledTimes(1);
   });
 
-  it('should preserve existing incoming x-correlation-id header', () => {
-    mockRequest.headers = { 'x-correlation-id': 'client-corr-999' };
+  it('should preserve existing incoming x-correlation-id and x-request-id headers', () => {
+    mockRequest.headers = {
+      'x-correlation-id': 'client-corr-999',
+      'x-request-id': 'client-req-888'
+    };
 
     loggerMiddleware(mockRequest as Request, mockResponse as Response, mockNext);
 
     expect(mockRequest.correlationId).toBe('client-corr-999');
+    expect(mockRequest.requestId).toBe('client-req-888');
     expect(mockResponse.setHeader).toHaveBeenCalledWith('X-Correlation-Id', 'client-corr-999');
+    expect(mockResponse.setHeader).toHaveBeenCalledWith('X-Request-ID', 'client-req-888');
   });
 
   it('should log structured JSON on request finish', () => {
@@ -58,6 +65,7 @@ describe('Logger Middleware & Sensitive Payload Redaction', () => {
     expect(consoleSpy).toHaveBeenCalledTimes(1);
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0]);
     expect(loggedJson.correlationId).toBeDefined();
+    expect(loggedJson.requestId).toBeDefined();
     expect(loggedJson.method).toBe('POST');
     expect(loggedJson.path).toBe('/api/v1/sessions');
     expect(loggedJson.statusCode).toBe(200);

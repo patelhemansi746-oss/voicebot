@@ -1,15 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 
-// Extend Express Request type to include correlationId
-declare global {
-  namespace Express {
-    interface Request {
-      correlationId?: string;
-    }
-  }
-}
-
 const SENSITIVE_KEYS = new Set([
   'password',
   'token',
@@ -52,6 +43,7 @@ export interface StructuredLog {
   timestamp: string;
   level: 'info' | 'warn' | 'error';
   correlationId: string;
+  requestId?: string;
   method: string;
   path: string;
   statusCode: number;
@@ -62,14 +54,24 @@ export interface StructuredLog {
 }
 
 export const loggerMiddleware = (req: Request, res: Response, next: NextFunction): void => {
-  // 1. Extract or generate Correlation ID
+  // Ensure correlationId and requestId are initialized if not already done by requestIdMiddleware
   const correlationId =
+    req.correlationId ||
     (req.headers['x-correlation-id'] as string) ||
     (req.headers['x-request-id'] as string) ||
     uuidv4();
 
+  const requestId =
+    req.requestId ||
+    (req.headers['x-request-id'] as string) ||
+    correlationId;
+
   req.correlationId = correlationId;
+  req.requestId = requestId;
+
   res.setHeader('X-Correlation-Id', correlationId);
+  res.setHeader('X-Request-ID', requestId);
+  res.setHeader('X-Request-Id', requestId);
 
   const start = Date.now();
 
@@ -84,6 +86,7 @@ export const loggerMiddleware = (req: Request, res: Response, next: NextFunction
       timestamp: new Date().toISOString(),
       level,
       correlationId,
+      requestId,
       method: req.method,
       path: req.originalUrl || req.url,
       statusCode,

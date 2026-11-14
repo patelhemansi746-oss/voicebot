@@ -68,11 +68,36 @@ export class SessionController {
       const session = sessionService.getSessionById(id);
 
       if (!session) {
-        throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND');
+        throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
       }
 
       const response: ApiResponse = {
         success: true,
+        data: session,
+        timestamp: new Date().toISOString()
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * POST /api/v1/sessions/:id/start
+   */
+  public startSession = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const { id } = req.params;
+      const session = sessionService.startSession(id);
+
+      const response: ApiResponse = {
+        success: true,
+        message: `Session '${id}' started successfully`,
         data: session,
         timestamp: new Date().toISOString()
       };
@@ -162,6 +187,32 @@ export class SessionController {
   };
 
   /**
+   * POST /api/v1/sessions/:id/fail
+   */
+  public failSession = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const { id } = req.params;
+      const { reason } = req.body || {};
+      const session = sessionService.failSession(id, reason);
+
+      const response: ApiResponse = {
+        success: true,
+        message: `Session '${id}' failed`,
+        data: session,
+        timestamp: new Date().toISOString()
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
    * PATCH /api/v1/sessions/:id/context
    */
   public updateContext = async (
@@ -199,12 +250,12 @@ export class SessionController {
       const deleted = sessionService.deleteSession(id);
 
       if (!deleted) {
-        throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND');
+        throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
       }
 
       const response: ApiResponse = {
         success: true,
-        message: `Session '${id}' successfully terminated and removed`,
+        message: `Session '${id}' deleted successfully`,
         timestamp: new Date().toISOString()
       };
 
@@ -215,9 +266,8 @@ export class SessionController {
   };
 
   /**
-   * GET /api/v1/sessions/:id/events
-   * Server-Sent Events (SSE) streaming endpoint
-   * Streams ordered session events in real-time and replays history.
+   * GET /api/v1/sessions/:id/events (Server-Sent Events)
+   * Streams ordered lifecycle and context events with historical replay
    */
   public streamSessionEvents = async (
     req: Request,
@@ -226,36 +276,37 @@ export class SessionController {
   ): Promise<void> => {
     try {
       const { id } = req.params;
-      // Validates session exists and fetches historical events
-      const history = sessionService.getSessionEvents(id);
+      const session = sessionService.getSessionById(id);
 
-      // SSE Headers
+      if (!session) {
+        throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
+      }
+
+      // Configure SSE response headers
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
       res.flushHeaders();
 
-      // Format helper for SSE
-      const writeEvent = (event: SessionEvent) => {
-        res.write(`id: ${event.id}\n`);
+      // 1. Replay historical events in chronological order
+      const history = sessionService.getSessionEvents(id);
+      for (const event of history) {
         res.write(`event: ${event.type}\n`);
         res.write(`data: ${JSON.stringify(event)}\n\n`);
-      };
-
-      // 1. Replay historical events in order
-      for (const event of history) {
-        writeEvent(event);
       }
 
-      // 2. Subscribe to live events
-      const unsubscribe = sessionService.subscribeToSessionEvents(id, (event) => {
-        writeEvent(event);
+      // 2. Subscribe to real-time events
+      const unsubscribe = sessionService.subscribeToSessionEvents(id, (event: SessionEvent) => {
+        res.write(`event: ${event.type}\n`);
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
       });
 
-      // 3. Clean up on connection close
+      // Cleanup on client disconnect
       req.on('close', () => {
         unsubscribe();
+        if (typeof res.end === 'function') {
+          res.end();
+        }
       });
     } catch (error) {
       next(error);

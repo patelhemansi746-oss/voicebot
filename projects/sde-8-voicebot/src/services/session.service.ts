@@ -11,6 +11,12 @@ import {
 import { env } from '../config/env';
 import { AppError } from '../middleware/error.middleware';
 
+const TERMINAL_STATUSES = new Set<SessionStatus>([
+  SessionStatus.COMPLETED,
+  SessionStatus.FAILED,
+  SessionStatus.EXPIRED
+]);
+
 export class SessionService extends EventEmitter {
   private sessions: Map<string, VoiceSession> = new Map();
   private eventStore: Map<string, SessionEvent[]> = new Map();
@@ -43,23 +49,24 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Create a new voicebot session (Initial status: ACTIVE)
+   * Create a new voicebot session (Initial status: CREATED, or ACTIVE if autoStart is requested)
    */
   public createSession(dto: CreateSessionDto): VoiceSession {
     // Check expiry on active sessions before creating new ones
     this.checkAndExpireSessions();
 
     if (this.sessions.size >= env.MAX_CONCURRENT_SESSIONS) {
-      throw new AppError('Max concurrent sessions reached', 429, 'MAX_SESSIONS_EXCEEDED');
+      throw new AppError('Max concurrent sessions reached', 429, 'MAX_SESSIONS_EXCEEDED', undefined, true);
     }
 
     const now = new Date().toISOString();
     const sessionId = uuidv4();
+    const initialStatus = dto.autoStart ? SessionStatus.ACTIVE : SessionStatus.CREATED;
 
     const newSession: VoiceSession = {
       id: sessionId,
       userId: dto.userId,
-      status: SessionStatus.ACTIVE,
+      status: initialStatus,
       createdAt: now,
       updatedAt: now,
       lastActivity: now,
@@ -81,6 +88,12 @@ export class SessionService extends EventEmitter {
       userId: newSession.userId,
       status: newSession.status
     });
+
+    if (initialStatus === SessionStatus.ACTIVE) {
+      this.recordEvent(sessionId, SessionEventType.SESSION_ACTIVE, {
+        status: newSession.status
+      });
+    }
 
     return newSession;
   }
@@ -115,15 +128,49 @@ export class SessionService extends EventEmitter {
   }
 
   /**
+   * Start a session (CREATED -> ACTIVE)
+   */
+  public startSession(id: string): VoiceSession {
+    const session = this.getSessionById(id);
+    if (!session) {
+      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
+    }
+
+    // Idempotent: already active
+    if (session.status === SessionStatus.ACTIVE) {
+      return session;
+    }
+
+    if (TERMINAL_STATUSES.has(session.status) || session.status === SessionStatus.STOPPING) {
+      throw new AppError(
+        `Cannot start session '${id}' in terminal status '${session.status}'`,
+        409,
+        'ILLEGAL_TRANSITION',
+        undefined,
+        false
+      );
+    }
+
+    const now = new Date().toISOString();
+    session.status = SessionStatus.ACTIVE;
+    session.updatedAt = now;
+    session.lastActivity = now;
+
+    this.recordEvent(id, SessionEventType.SESSION_ACTIVE, { status: session.status });
+    return session;
+  }
+
+  /**
    * Pause an active session.
    * - ACTIVE -> PAUSED: transitions and emits event.
    * - PAUSED -> PAUSED: IDEMPOTENT, returns existing session without error.
-   * - STOPPED or EXPIRED -> ILLEGAL_TRANSITION rejected with 409.
+   * - CREATED -> ILLEGAL_TRANSITION (session not started yet).
+   * - Terminal states / STOPPING -> ILLEGAL_TRANSITION rejected with 409.
    */
   public pauseSession(id: string): VoiceSession {
     const session = this.getSessionById(id);
     if (!session) {
-      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND');
+      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
     }
 
     // Idempotent: repeated pause command on already paused session
@@ -131,12 +178,24 @@ export class SessionService extends EventEmitter {
       return session;
     }
 
-    // Reject illegal transitions from terminal states
-    if (session.status === SessionStatus.STOPPED || session.status === SessionStatus.EXPIRED) {
+    if (session.status === SessionStatus.CREATED) {
+      throw new AppError(
+        `Cannot pause session '${id}' in 'created' status; must be started first`,
+        409,
+        'ILLEGAL_TRANSITION',
+        undefined,
+        false
+      );
+    }
+
+    // Reject illegal transitions from terminal states or stopping
+    if (TERMINAL_STATUSES.has(session.status) || session.status === SessionStatus.STOPPING) {
       throw new AppError(
         `Cannot pause session '${id}' in terminal status '${session.status}'`,
         409,
-        'ILLEGAL_TRANSITION'
+        'ILLEGAL_TRANSITION',
+        undefined,
+        false
       );
     }
 
@@ -150,15 +209,15 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Resume a paused session.
-   * - PAUSED -> ACTIVE: transitions and emits event.
+   * Resume a paused or created session.
+   * - PAUSED / CREATED -> ACTIVE: transitions and emits event.
    * - ACTIVE -> ACTIVE: IDEMPOTENT, returns existing session without error.
-   * - STOPPED or EXPIRED -> ILLEGAL_TRANSITION rejected with 409.
+   * - Terminal states / STOPPING -> ILLEGAL_TRANSITION rejected with 409.
    */
   public resumeSession(id: string): VoiceSession {
     const session = this.getSessionById(id);
     if (!session) {
-      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND');
+      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
     }
 
     // Idempotent: repeated resume command on already active session
@@ -167,11 +226,13 @@ export class SessionService extends EventEmitter {
     }
 
     // Reject illegal transitions
-    if (session.status === SessionStatus.STOPPED || session.status === SessionStatus.EXPIRED) {
+    if (TERMINAL_STATUSES.has(session.status) || session.status === SessionStatus.STOPPING) {
       throw new AppError(
         `Cannot resume session '${id}' in terminal status '${session.status}'`,
         409,
-        'ILLEGAL_TRANSITION'
+        'ILLEGAL_TRANSITION',
+        undefined,
+        false
       );
     }
 
@@ -186,27 +247,121 @@ export class SessionService extends EventEmitter {
 
   /**
    * Stop/terminate a session.
-   * - ACTIVE / PAUSED -> STOPPED: transitions and emits event.
-   * - STOPPED -> STOPPED: IDEMPOTENT, returns existing session without error.
-   * - EXPIRED -> STOPPED: IDEMPOTENT or returns existing session.
+   * - ACTIVE / PAUSED / CREATED -> STOPPING -> COMPLETED: transitions and emits events.
+   * - COMPLETED / STOPPING -> COMPLETED: IDEMPOTENT, returns existing session without error.
    */
   public stopSession(id: string): VoiceSession {
     const session = this.getSessionById(id);
     if (!session) {
-      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND');
+      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
     }
 
-    // Idempotent: repeated stop command
-    if (session.status === SessionStatus.STOPPED) {
+    // Idempotent: repeated stop command on already completed session
+    if (session.status === SessionStatus.COMPLETED) {
       return session;
     }
 
     const now = new Date().toISOString();
-    session.status = SessionStatus.STOPPED;
+
+    // Intermediate transition: STOPPING
+    session.status = SessionStatus.STOPPING;
+    session.updatedAt = now;
+    this.recordEvent(id, SessionEventType.SESSION_STOPPING, { status: session.status });
+
+    // Terminal completion
+    session.status = SessionStatus.COMPLETED;
     session.updatedAt = now;
     session.lastActivity = now;
 
-    this.recordEvent(id, SessionEventType.SESSION_STOPPED, { status: session.status });
+    this.recordEvent(id, SessionEventType.SESSION_COMPLETED, { status: session.status });
+    return session;
+  }
+
+  /**
+   * Transition session into failed state
+   */
+  public failSession(id: string, reason = 'Unrecoverable error occurred'): VoiceSession {
+    const session = this.getSessionById(id);
+    if (!session) {
+      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
+    }
+
+    if (session.status === SessionStatus.FAILED) {
+      return session;
+    }
+
+    if (session.status === SessionStatus.COMPLETED || session.status === SessionStatus.EXPIRED) {
+      throw new AppError(
+        `Cannot fail session '${id}' in terminal status '${session.status}'`,
+        409,
+        'ILLEGAL_TRANSITION',
+        undefined,
+        false
+      );
+    }
+
+    const now = new Date().toISOString();
+    session.status = SessionStatus.FAILED;
+    session.updatedAt = now;
+    session.lastActivity = now;
+
+    this.recordEvent(id, SessionEventType.SESSION_FAILED, { status: session.status, reason });
+    return session;
+  }
+
+  /**
+   * Transition to explicit intermediate status (e.g. STOPPING for graceful teardown)
+   */
+  public transitionTo(id: string, targetStatus: SessionStatus): VoiceSession {
+    const session = this.getSessionById(id);
+    if (!session) {
+      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
+    }
+
+    if (session.status === targetStatus) {
+      return session;
+    }
+
+    if (TERMINAL_STATUSES.has(session.status)) {
+      throw new AppError(
+        `Cannot transition session '${id}' from terminal status '${session.status}' to '${targetStatus}'`,
+        409,
+        'ILLEGAL_TRANSITION',
+        undefined,
+        false
+      );
+    }
+
+    const now = new Date().toISOString();
+    session.status = targetStatus;
+    session.updatedAt = now;
+    session.lastActivity = now;
+
+    let eventType: SessionEventType;
+    switch (targetStatus) {
+      case SessionStatus.ACTIVE:
+        eventType = SessionEventType.SESSION_ACTIVE;
+        break;
+      case SessionStatus.PAUSED:
+        eventType = SessionEventType.SESSION_PAUSED;
+        break;
+      case SessionStatus.STOPPING:
+        eventType = SessionEventType.SESSION_STOPPING;
+        break;
+      case SessionStatus.COMPLETED:
+        eventType = SessionEventType.SESSION_COMPLETED;
+        break;
+      case SessionStatus.FAILED:
+        eventType = SessionEventType.SESSION_FAILED;
+        break;
+      case SessionStatus.EXPIRED:
+        eventType = SessionEventType.SESSION_EXPIRED;
+        break;
+      default:
+        eventType = SessionEventType.SESSION_CREATED;
+    }
+
+    this.recordEvent(id, eventType, { status: session.status });
     return session;
   }
 
@@ -220,7 +375,11 @@ export class SessionService extends EventEmitter {
     let expiredCount = 0;
 
     for (const session of this.sessions.values()) {
-      if (session.status === SessionStatus.ACTIVE || session.status === SessionStatus.PAUSED) {
+      if (
+        session.status === SessionStatus.CREATED ||
+        session.status === SessionStatus.ACTIVE ||
+        session.status === SessionStatus.PAUSED
+      ) {
         const lastActiveTime = new Date(session.lastActivity).getTime();
         if (now - lastActiveTime >= timeoutMs) {
           const isoNow = new Date().toISOString();
@@ -239,19 +398,21 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Update screen / application context for an active session
+   * Update screen / application context for a session
    */
   public updateSessionContext(id: string, contextDto: UpdateSessionContextDto): VoiceSession {
     const session = this.getSessionById(id);
     if (!session) {
-      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND');
+      throw new AppError(`Session with ID '${id}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
     }
 
-    if (session.status === SessionStatus.STOPPED || session.status === SessionStatus.EXPIRED) {
+    if (TERMINAL_STATUSES.has(session.status) || session.status === SessionStatus.STOPPING) {
       throw new AppError(
         `Cannot update context for session '${id}' in terminal status '${session.status}'`,
         409,
-        'ILLEGAL_TRANSITION'
+        'ILLEGAL_TRANSITION',
+        undefined,
+        false
       );
     }
 
@@ -276,7 +437,7 @@ export class SessionService extends EventEmitter {
   public getSessionEvents(sessionId: string): SessionEvent[] {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new AppError(`Session with ID '${sessionId}' not found`, 404, 'SESSION_NOT_FOUND');
+      throw new AppError(`Session with ID '${sessionId}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
     }
     return this.eventStore.get(sessionId) || [];
   }

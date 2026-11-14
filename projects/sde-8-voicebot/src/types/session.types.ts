@@ -1,20 +1,32 @@
 import { z } from 'zod';
 
 export enum SessionStatus {
+  CREATED = 'created',
   ACTIVE = 'active',
   PAUSED = 'paused',
-  STOPPED = 'stopped',
+  STOPPING = 'stopping',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
   EXPIRED = 'expired'
 }
 
+// Retain STOPPED alias pointing to COMPLETED for backwards compatibility
+(SessionStatus as any).STOPPED = SessionStatus.COMPLETED;
+
 export enum SessionEventType {
   SESSION_CREATED = 'session.created',
+  SESSION_ACTIVE = 'session.active',
   SESSION_PAUSED = 'session.paused',
   SESSION_RESUMED = 'session.resumed',
-  SESSION_STOPPED = 'session.stopped',
+  SESSION_STOPPING = 'session.stopping',
+  SESSION_COMPLETED = 'session.completed',
+  SESSION_FAILED = 'session.failed',
   SESSION_EXPIRED = 'session.expired',
   CONTEXT_UPDATED = 'context.updated'
 }
+
+// Retain SESSION_STOPPED alias for backwards compatibility
+(SessionEventType as any).SESSION_STOPPED = SessionEventType.SESSION_COMPLETED;
 
 export interface SessionContext {
   activeApplication?: string;
@@ -54,7 +66,8 @@ export const createSessionSchema = z.object({
       visibleContentSnippet: z.string().max(50000, 'visibleContentSnippet cannot exceed 50000 characters').optional()
     })
     .optional(),
-  metadata: z.record(z.unknown()).optional()
+  metadata: z.record(z.unknown()).optional(),
+  autoStart: z.boolean().optional()
 });
 
 export const updateSessionStatusSchema = z.object({
@@ -77,6 +90,7 @@ export interface CreateSessionDto {
     visibleContentSnippet?: string;
   };
   metadata?: Record<string, unknown>;
+  autoStart?: boolean;
 }
 
 export type UpdateSessionStatusDto = z.infer<typeof updateSessionStatusSchema>;
