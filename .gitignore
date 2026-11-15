@@ -26,3 +26,9 @@ yarn-error.log*
 Thumbs.db
 .vscode/
 .idea/
+
+archive/
+.tmp/
+__pycache__/
+*.pyc
+.jest-cache/
