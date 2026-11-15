@@ -1,6 +1,6 @@
 # Team SDE 8: Context & Reasoning Engine
 **Project:** Academia - AI Voice Co-Pilot  
-**Sprint:** Week 2 (W3 - Context & Reasoning: Opt-in Capture, Context Builder & LLM Adapter)  
+**Sprint:** Week 3 (W3 - Source-Linked Observations, Grounded Answers & Workflow Handoff)  
 **Branch:** `pratiksha-hanji`  
 **Location:** `projects/sde-8-voicebot/`
 
@@ -10,13 +10,16 @@
 The **Context & Reasoning Engine** serves as the central intelligence bridge between sensory input layers (Voice STT, Screen OCR, Active Application) and downstream action components (Agent Orchestrator, Safety Gate, Voice TTS).
 
 This module delivers:
-1. **Opt-in Capture Adapter (D8–9)**: Strictly OFF by default until explicit opt-in consent; enforces frame dimension ($\le 1920\times 1080$), byte size ($\le 2\text{ MB}$), and sampling interval ($\ge 500\text{ms}$) limits. Synthetic frames only; real screenshots prohibited.
-2. **OCR / Vision Adapter Interface & Mock (D8–9)**: `IOcrVisionAdapter` interface with offline deterministic `MockOcrVisionAdapter` providing tokenized text lines, word confidences, and visual UI element bounding boxes.
-3. **Bounded Context Builder (D10–11)**: Recency & relevance selection, heuristic token budget approximation (~4 chars/token), stale filtering (evicts items older than 300s TTL), and greedy token packing.
-4. **Resilient LLM Client Adapter (D12–13)**: `ILlmClientAdapter` with configurable timeout (`timeoutMs`), exponential backoff retry loop on transient errors, and strict structured output validation via Zod schemas (`ReasoningResultSchema`).
-5. **Malformed Output Handling (D14)**: Fast rejection of non-JSON payloads (`LlmMalformedOutputError`) and schema violations (`LlmValidationError`) without retry loops.
-6. **Privacy Guardrails (PRD Section 19)**: Automatic redaction of credentials, API keys (`sk-...`), and passwords.
-7. **Versioned Prompt Management**: Semver-controlled system prompts (`v1.0.0`, `v1.1.0`) with XML data separation (`<untrusted_environment_context>`, `<untrusted_user_query>`) and delimiter neutralization.
+1. **Source-Linked Observations & Duplicate/Stale Filtering (D15–16)**: Every observation carries an ISO timestamp and verified `SourceReference`. Stale frames (> 300s TTL) and duplicate frames (detected via SHA-256 content hashes) are dropped automatically.
+2. **Consent Revocation & Context Buffer Purge (D15–16)**: Withdrawing consent immediately stops capture and clears all pending in-memory observations and context buffers.
+3. **Grounded Answers with Verifiable Citations (D17–18)**: Reasoning responses cite exact application names, window titles, and verifiable quotes.
+4. **Honest "No Evidence" Responses (D17–18)**: When context lacks supporting evidence, the engine strictly states no evidence is available instead of guessing or hallucinating facts.
+5. **Prompt-Injection Defense & Security Invariance (D19–20)**: Neutralizes delimiter breakouts (`</untrusted_user_query>`, `<system>`), disarms adversarial commands inside screen OCR (`[DISARMED_DANGEROUS_COMMAND]`), and ensures safety classification cannot be bypassed.
+6. **WorkflowProposal Handoff (D19–20)**: Schema-validated multi-step `WorkflowProposal` handed off to the workflow module and executed end-to-end in mock mode.
+7. **Opt-in Capture Adapter (D8–9)**: Strictly OFF by default until explicit opt-in consent; enforces frame dimension ($\le 1920\times 1080$), byte size ($\le 2\text{ MB}$), and sampling interval ($\ge 500\text{ms}$) limits. Synthetic frames only; real screenshots prohibited.
+8. **OCR / Vision Adapter Interface & Mock (D8–9)**: `IOcrVisionAdapter` interface with offline deterministic `MockOcrVisionAdapter`.
+9. **Bounded Context Builder (D10–11)**: Recency & relevance selection, heuristic token budget approximation (~4 chars/token), stale filtering, and greedy token packing.
+10. **Resilient LLM Client Adapter (D12–13)**: `ILlmClientAdapter` with configurable `timeoutMs`, exponential backoff retry loop, and Zod structured-output validation.
 
 ---
 
@@ -47,10 +50,21 @@ projects/sde-8-voicebot/
 │   │   └── bounded-context-builder.ts# Token budget packing & TTL stale filter
 │   ├── llm/
 │   │   └── llm.adapter.ts            # ILlmClientAdapter, MockLlmAdapter, retry & validation
+│   ├── observations/
+│   │   ├── observation.types.ts      # SourceLinkedObservation definitions & errors
+│   │   └── observation-store.ts      # Duplicate hash detection, stale filter & consent purge
+│   ├── grounding/
+│   │   ├── grounding.types.ts        # SourceCitation & GroundedAnswer contracts
+│   │   └── grounded-reasoning.service.ts # Citations & honest no-evidence reasoning
+│   ├── security/
+│   │   └── prompt-injection-guard.ts # Delimiter breakout & adversarial OCR disarming
+│   ├── workflow-handoff/
+│   │   ├── workflow-proposal.schema.ts # Zod WorkflowProposal schema
+│   │   └── workflow-handoff.adapter.ts # Mock orchestrator bridge & end-to-end handoff
 │   ├── services/
 │   │   └── mock-reasoning.service.ts # Intent reasoning & Safety Level A-D
-│   ├── demo.ts                       # Interactive Live Demo runner (7 scenarios)
-│   ├── run-tests.ts                  # Comprehensive TypeScript test suite (39 tests)
+│   ├── demo.ts                       # Interactive Live Demo runner (11 scenarios)
+│   ├── run-tests.ts                  # Comprehensive TypeScript test suite (51 tests)
 │   └── index.ts                      # Main module exports
 ├── tests/
 │   └── context-and-reasoning.spec.ts # Jest unit & integration tests
@@ -74,13 +88,13 @@ npm install
 ```
 
 ### Running the Live Demo
-Executes 7 interactive scenarios covering Developer Error, PDF Research, Controlled Action, Privacy Redaction, Opt-in Capture, Bounded Context Builder, and Resilient LLM generation:
+Executes 11 interactive scenarios covering Developer Error, PDF Research, Safety Gates, Privacy, Opt-in Capture, Bounded Context, Observations, Consent Revocation, Grounded Citations, Honest No-Evidence, Prompt-Injection Defense, and Workflow Handoff:
 ```bash
 npm run demo
 ```
 
 ### Running Automated Tests
-Executes the full 39-test suite verifying opt-in capture, OCR/vision, bounded context, LLM retry, and malformed output:
+Executes the full 51-test suite verifying Week 1, Week 2, and Week 3 deliverables:
 ```bash
 npm test
 ```
@@ -117,7 +131,7 @@ npm run test:jest
 
 ---
 
-## 6. Automated Test Output (39/39 Passed - 100%)
+## 6. Automated Test Output (51/51 Passed - 100%)
 
 ```text
 Running Team SDE 8 TypeScript Test Suite...
@@ -161,6 +175,18 @@ Running Team SDE 8 TypeScript Test Suite...
   ✓ Week 2 LLM: Exponential backoff retries transient failures and eventually succeeds
   ✓ Week 2 Malformed Output: Non-JSON raw text throws LlmMalformedOutputError without retry
   ✓ Week 2 Malformed Output: Valid JSON violating Zod schema throws LlmValidationError with issues
+  ✓ Week 3 Observations: Timestamped & source-linked observations carry valid metadata
+  ✓ Week 3 Observations: Duplicate frames are detected via content hash and dropped
+  ✓ Week 3 Observations: Stale frames exceeding TTL are dropped
+  ✓ Week 3 Observations: Consent withdrawal halts capture and purges pending context
+  ✓ Week 3 Grounding: Grounded answers cite exact source references and quotes
+  ✓ Week 3 Grounding: When context lacks evidence, response states no evidence instead of guessing
+  ✓ Week 3 Security: Direct prompt injection delimiters and system tags are disarmed
+  ✓ Week 3 Security: Instructions inside screen OCR are treated as passive data and never executed
+  ✓ Week 3 Workflow Handoff: Valid WorkflowProposal parses cleanly through schema
+  ✓ Week 3 Workflow Handoff: Invalid proposal missing steps throws WorkflowProposalValidationError
+  ✓ Week 3 Workflow Handoff: Hands off proposal and executes end-to-end in mock mode
+  ✓ Week 3 Workflow Handoff: Sensitive Level C/D proposal pauses for human approval
 
-Test Results: 39/39 passed (100%)
+Test Results: 51/51 passed (100%)
 ```
