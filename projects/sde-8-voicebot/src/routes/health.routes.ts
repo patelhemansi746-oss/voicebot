@@ -1,38 +1,41 @@
 import { Router, Request, Response } from 'express';
 import { ApiResponse } from '../types/common.types';
+import { healthService } from '../services/health.service';
 
 const router = Router();
 
 // Liveness monitoring endpoint (GET /health)
 router.get('/', (_req: Request, res: Response) => {
+  const aggregated = healthService.getAggregatedHealth();
+
   const response: ApiResponse = {
-    success: true,
+    success: aggregated.status !== 'DOWN',
     message: 'Voicebot backend service is healthy',
-    data: {
-      status: 'UP',
-      uptime: process.uptime(),
-      timestamp: new Date().toISOString()
-    },
+    data: aggregated,
     timestamp: new Date().toISOString()
   };
 
-  res.status(200).json(response);
+  const statusCode = aggregated.status === 'DOWN' ? 503 : 200;
+  res.status(statusCode).json(response);
 });
 
 // Readiness monitoring endpoint (GET /ready or GET /health/ready)
 router.get('/ready', (_req: Request, res: Response) => {
+  const aggregated = healthService.getAggregatedHealth();
+  const isReady = aggregated.status === 'UP';
+
   const response: ApiResponse = {
-    success: true,
-    message: 'Voicebot backend service is ready',
+    success: isReady,
+    message: isReady ? 'Voicebot backend service is ready' : 'Service dependencies not ready',
     data: {
-      status: 'READY',
-      uptime: process.uptime(),
-      timestamp: new Date().toISOString()
+      ...aggregated,
+      status: isReady ? 'READY' : aggregated.status
     },
     timestamp: new Date().toISOString()
   };
 
-  res.status(200).json(response);
+  const statusCode = isReady ? 200 : 503;
+  res.status(statusCode).json(response);
 });
 
 export default router;

@@ -20,6 +20,7 @@ const TERMINAL_STATUSES = new Set<SessionStatus>([
 export class SessionService extends EventEmitter {
   private sessions: Map<string, VoiceSession> = new Map();
   private eventStore: Map<string, SessionEvent[]> = new Map();
+  private sequenceCounters: Map<string, number> = new Map();
 
   constructor() {
     super();
@@ -28,12 +29,16 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Helper to append an event to the session event history and emit it in real-time
+   * Helper to append an event to the session event history with a monotonic sequence number
    */
-  private recordEvent(sessionId: string, type: SessionEventType, payload?: Record<string, unknown>): SessionEvent {
+  public recordEvent(sessionId: string, type: SessionEventType, payload?: Record<string, unknown>): SessionEvent {
+    const nextSeq = (this.sequenceCounters.get(sessionId) || 0) + 1;
+    this.sequenceCounters.set(sessionId, nextSeq);
+
     const event: SessionEvent = {
       id: uuidv4(),
       sessionId,
+      sequenceNumber: nextSeq,
       type,
       timestamp: new Date().toISOString(),
       payload
@@ -82,8 +87,9 @@ export class SessionService extends EventEmitter {
 
     this.sessions.set(sessionId, newSession);
     this.eventStore.set(sessionId, []);
+    this.sequenceCounters.set(sessionId, 0);
 
-    // Record session creation event
+    // Record session creation event (Seq #1)
     this.recordEvent(sessionId, SessionEventType.SESSION_CREATED, {
       userId: newSession.userId,
       status: newSession.status
@@ -432,14 +438,22 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Retrieve historical events in chronological order for SSE replay
+   * Retrieve historical events in chronological order with optional sequence filtering.
+   * If sinceSequence is provided, returns only events with sequenceNumber > sinceSequence.
+   * Guarantees no gaps and no duplicate events for reconnecting clients.
    */
-  public getSessionEvents(sessionId: string): SessionEvent[] {
+  public getSessionEvents(sessionId: string, sinceSequence?: number): SessionEvent[] {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new AppError(`Session with ID '${sessionId}' not found`, 404, 'SESSION_NOT_FOUND', undefined, false);
     }
-    return this.eventStore.get(sessionId) || [];
+    const events = this.eventStore.get(sessionId) || [];
+
+    if (sinceSequence !== undefined && sinceSequence > 0) {
+      return events.filter((e) => e.sequenceNumber > sinceSequence);
+    }
+
+    return events;
   }
 
   /**
@@ -460,6 +474,7 @@ export class SessionService extends EventEmitter {
    * Delete session completely (clean up memory & events)
    */
   public deleteSession(id: string): boolean {
+    this.sequenceCounters.delete(id);
     this.eventStore.delete(id);
     return this.sessions.delete(id);
   }
@@ -470,6 +485,7 @@ export class SessionService extends EventEmitter {
   public clearAllSessions(): void {
     this.sessions.clear();
     this.eventStore.clear();
+    this.sequenceCounters.clear();
     this.removeAllListeners();
   }
 }

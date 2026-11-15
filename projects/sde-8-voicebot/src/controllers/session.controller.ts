@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { sessionService } from '../services/session.service';
+import { interactionService } from '../services/interaction.service';
 import { AppError } from '../middleware/error.middleware';
 import { ApiResponse } from '../types/common.types';
 import { SessionEvent } from '../types/session.types';
@@ -266,8 +267,41 @@ export class SessionController {
   };
 
   /**
+   * POST /api/v1/sessions/:id/interact
+   * Routes a session turn through Audio ➔ Transcription ➔ Reasoning ➔ Workflow
+   */
+  public interact = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const { id } = req.params;
+      const requestId = req.requestId || (req.headers['x-request-id'] as string) || 'req-interaction';
+      const correlationId = req.correlationId || (req.headers['x-correlation-id'] as string) || requestId;
+
+      const result = await interactionService.processTurn(id, req.body, {
+        requestId,
+        correlationId
+      });
+
+      const response: ApiResponse = {
+        success: true,
+        message: 'Session interaction turn completed successfully',
+        data: result,
+        timestamp: new Date().toISOString()
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
    * GET /api/v1/sessions/:id/events (Server-Sent Events)
-   * Streams ordered lifecycle and context events with historical replay
+   * Streams ordered lifecycle and context events with historical replay and reconnect support.
+   * If Last-Event-ID or ?since= is sent, replays strictly events after that sequence.
    */
   public streamSessionEvents = async (
     req: Request,
@@ -288,15 +322,28 @@ export class SessionController {
       res.setHeader('Connection', 'keep-alive');
       res.flushHeaders();
 
-      // 1. Replay historical events in chronological order
-      const history = sessionService.getSessionEvents(id);
+      // Check reconnect sequence: Last-Event-ID header (standard SSE) or query param
+      const lastEventIdHeader = req.headers ? (req.headers['last-event-id'] as string) : undefined;
+      const sinceQuery = req.query ? (req.query.since as string) : undefined;
+      let sinceSeq: number | undefined = undefined;
+
+      if (lastEventIdHeader && !isNaN(parseInt(lastEventIdHeader, 10))) {
+        sinceSeq = parseInt(lastEventIdHeader, 10);
+      } else if (sinceQuery && !isNaN(parseInt(sinceQuery, 10))) {
+        sinceSeq = parseInt(sinceQuery, 10);
+      }
+
+      // 1. Replay historical events in chronological order with no gaps or duplicates
+      const history = sessionService.getSessionEvents(id, sinceSeq);
       for (const event of history) {
+        res.write(`id: ${event.sequenceNumber}\n`);
         res.write(`event: ${event.type}\n`);
         res.write(`data: ${JSON.stringify(event)}\n\n`);
       }
 
       // 2. Subscribe to real-time events
       const unsubscribe = sessionService.subscribeToSessionEvents(id, (event: SessionEvent) => {
+        res.write(`id: ${event.sequenceNumber}\n`);
         res.write(`event: ${event.type}\n`);
         res.write(`data: ${JSON.stringify(event)}\n\n`);
       });

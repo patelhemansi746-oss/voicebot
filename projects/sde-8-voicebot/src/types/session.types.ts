@@ -22,7 +22,15 @@ export enum SessionEventType {
   SESSION_COMPLETED = 'session.completed',
   SESSION_FAILED = 'session.failed',
   SESSION_EXPIRED = 'session.expired',
-  CONTEXT_UPDATED = 'context.updated'
+  CONTEXT_UPDATED = 'context.updated',
+  // Week 3 Pipeline Event Types
+  AUDIO_INGESTED = 'audio.ingested',
+  TRANSCRIPTION_COMPLETED = 'transcription.completed',
+  REASONING_COMPLETED = 'reasoning.completed',
+  TOOL_APPROVAL_REQUIRED = 'tool.approval_required',
+  TOOL_EXECUTING = 'tool.executing',
+  TOOL_COMPLETED = 'tool.completed',
+  INTERACTION_COMPLETED = 'interaction.completed'
 }
 
 // Retain SESSION_STOPPED alias for backwards compatibility
@@ -39,6 +47,7 @@ export interface SessionContext {
 export interface SessionEvent {
   id: string;
   sessionId: string;
+  sequenceNumber: number; // Monotonically increasing sequence per session
   type: SessionEventType;
   timestamp: string;
   payload?: Record<string, unknown>;
@@ -81,6 +90,22 @@ export const updateSessionContextSchema = z.object({
   visibleContentSnippet: z.string().max(50000, 'visibleContentSnippet cannot exceed 50000 characters').optional()
 });
 
+export const interactSessionSchema = z.object({
+  audio: z
+    .object({
+      format: z.enum(['pcm16', 'wav', 'mp3', 'opus']).optional(),
+      sampleRate: z.number().int().positive().optional(),
+      channels: z.number().int().positive().optional(),
+      chunkBase64: z.string().optional(),
+      durationMs: z.number().positive().optional(),
+      mockPrompt: z.string().max(5000).optional()
+    })
+    .optional(),
+  promptText: z.string().max(5000).optional(),
+  humanApproved: z.boolean().optional(),
+  approvalId: z.string().optional()
+});
+
 export interface CreateSessionDto {
   userId: string;
   initialContext?: {
@@ -95,3 +120,4 @@ export interface CreateSessionDto {
 
 export type UpdateSessionStatusDto = z.infer<typeof updateSessionStatusSchema>;
 export type UpdateSessionContextDto = z.infer<typeof updateSessionContextSchema>;
+export type InteractSessionDto = z.infer<typeof interactSessionSchema>;

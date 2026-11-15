@@ -10,7 +10,7 @@
     "launcher": "ts-node src/scripts/launcher.ts",
     "launcher:prod": "node dist/scripts/launcher.js",
     "demo": "ts-node src/scripts/demo.ts",
-    "test": "jest --coverage",
+    "test": "jest --coverage --forceExit",
     "test:watch": "jest --watch",
     "test:unit": "jest tests/unit",
     "test:integration": "jest tests/integration",

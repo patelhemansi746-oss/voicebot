@@ -3,7 +3,8 @@ import { sessionController } from '../controllers/session.controller';
 import { validateBody } from '../middleware/validate.middleware';
 import {
   createSessionSchema,
-  updateSessionContextSchema
+  updateSessionContextSchema,
+  interactSessionSchema
 } from '../types/session.types';
 
 const router = Router();
@@ -17,7 +18,7 @@ router.get('/', sessionController.getAllSessions);
 // GET /api/v1/sessions/:id - Get session details
 router.get('/:id', sessionController.getSessionById);
 
-// GET /api/v1/sessions/:id/events - SSE Event stream
+// GET /api/v1/sessions/:id/events - SSE Event stream (supports reconnect via Last-Event-ID)
 router.get('/:id/events', sessionController.streamSessionEvents);
 
 // POST /api/v1/sessions/:id/start - Start session (created -> active)
@@ -34,6 +35,13 @@ router.post('/:id/stop', sessionController.stopSession);
 
 // POST /api/v1/sessions/:id/fail - Fail session
 router.post('/:id/fail', sessionController.failSession);
+
+// POST /api/v1/sessions/:id/interact - Route session through Audio ➔ Transcription ➔ Reasoning ➔ Workflow
+router.post(
+  '/:id/interact',
+  validateBody(interactSessionSchema),
+  sessionController.interact
+);
 
 // PATCH /api/v1/sessions/:id/context - Update screen/workspace context
 router.patch(

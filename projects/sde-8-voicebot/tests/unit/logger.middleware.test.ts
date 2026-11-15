@@ -9,7 +9,7 @@ describe('Logger Middleware & Sensitive Payload Redaction', () => {
   let consoleSpy: jest.SpyInstance;
 
   beforeEach(() => {
-    consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => { });
     mockRequest = {
       method: 'POST',
       originalUrl: '/api/v1/sessions',

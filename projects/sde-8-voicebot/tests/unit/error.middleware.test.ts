@@ -130,6 +130,18 @@ describe('Error Middleware', () => {
           })
         })
       );
+
+      // Status 404 and 400 branches
+      errorHandler({ status: 404 }, mockRequest as Request, mockResponse as Response, mockNext);
+      expect(mockResponse.status).toHaveBeenCalledWith(404);
+
+      errorHandler({ status: 400 }, mockRequest as Request, mockResponse as Response, mockNext);
+      expect(mockResponse.status).toHaveBeenCalledWith(400);
+
+      // Fallback when correlationId & requestId are absent on request
+      const bareReq: any = { headers: {} };
+      errorHandler(new Error('no context'), bareReq as Request, mockResponse as Response, mockNext);
+      expect(mockResponse.status).toHaveBeenCalledWith(500);
     });
 
     it('should handle generic unhandled Error as 500 with retryable=true and safe message', () => {

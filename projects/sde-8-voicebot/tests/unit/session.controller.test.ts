@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { sessionController } from '../../src/controllers/session.controller';
 import { sessionService } from '../../src/services/session.service';
-import { SessionStatus } from '../../src/types/session.types';
+import { SessionStatus, SessionEventType } from '../../src/types/session.types';
 
 describe('SessionController Unit Tests', () => {
   let mockReq: Partial<Request>;
@@ -73,6 +73,11 @@ describe('SessionController Unit Tests', () => {
 
     expect(statusOutput).toBe(200);
     expect(jsonOutput.data.status).toBe(SessionStatus.ACTIVE);
+
+    // Error path
+    mockReq = { params: { id: 'non-existent' } };
+    await sessionController.startSession(mockReq as Request, mockRes as Response, mockNext);
+    expect(mockNext).toHaveBeenCalled();
   });
 
   it('getAllSessions should return paginated list', async () => {
@@ -211,6 +216,8 @@ describe('SessionController Unit Tests', () => {
     let closeHandler: () => void = () => {};
     mockReq = {
       params: { id: session.id },
+      headers: {},
+      query: {},
       on: jest.fn().mockImplementation((event: string, handler: () => void) => {
         if (event === 'close') {
           closeHandler = handler;
@@ -231,5 +238,37 @@ describe('SessionController Unit Tests', () => {
     mockReq = { params: { id: 'invalid-id' } };
     await sessionController.streamSessionEvents(mockReq as Request, mockRes as Response, mockNext);
     expect(mockNext).toHaveBeenCalled();
+
+    // Stream with query param since and live event emission
+    mockReq = {
+      params: { id: session.id },
+      headers: {},
+      query: { since: '1' },
+      on: jest.fn().mockImplementation((event: string, handler: () => void) => {
+        if (event === 'close') {
+          closeHandler = handler;
+        }
+        return mockReq;
+      })
+    };
+    await sessionController.streamSessionEvents(mockReq as Request, mockRes as Response, mockNext);
+    sessionService.recordEvent(session.id, SessionEventType.SESSION_PAUSED);
+    closeHandler();
+  });
+
+  it('interact should process turn and return 200 with interaction result', async () => {
+    const session = sessionService.createSession({ userId: 'interact-user', autoStart: true });
+    mockReq = {
+      params: { id: session.id },
+      body: { promptText: 'Calculate 5 + 5' },
+      headers: { 'x-request-id': 'req-test', 'x-correlation-id': 'corr-test' }
+    };
+
+    await sessionController.interact(mockReq as Request, mockRes as Response, mockNext);
+
+    expect(statusOutput).toBe(200);
+    expect(jsonOutput.success).toBe(true);
+    expect(jsonOutput.data.sessionId).toBe(session.id);
+    expect(jsonOutput.data.finalResponse).toBeDefined();
   });
 });

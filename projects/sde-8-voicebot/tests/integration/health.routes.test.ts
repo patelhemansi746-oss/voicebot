@@ -2,24 +2,30 @@ import { request } from '../helpers/test-request';
 import { app } from '../../src/app';
 
 describe('Health, Readiness & Middleware Integration', () => {
-  it('GET /health should return 200 with service status UP and tracking headers', async () => {
+  it('GET /health should return 200 with aggregated module status and tracking headers', async () => {
     const res = await request(app).get('/health');
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data.status).toBe('UP');
     expect(typeof res.body.data.uptime).toBe('number');
+    expect(res.body.data.modules).toBeDefined();
+    expect(res.body.data.modules.audio.status).toBe('UP');
+    expect(res.body.data.modules.transcription.status).toBe('UP');
+    expect(res.body.data.modules.reasoning.status).toBe('UP');
+    expect(res.body.data.modules.workflow.status).toBe('UP');
     expect(res.headers['x-request-id']).toBeDefined();
     expect(res.headers['x-correlation-id']).toBeDefined();
   });
 
-  it('GET /ready should return 200 with readiness status READY', async () => {
+  it('GET /ready should return 200 with readiness status READY and aggregated module status', async () => {
     const res = await request(app).get('/ready');
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.message).toBe('Voicebot backend service is ready');
     expect(res.body.data.status).toBe('READY');
+    expect(res.body.data.modules).toBeDefined();
     expect(typeof res.body.data.uptime).toBe('number');
     expect(res.headers['x-request-id']).toBeDefined();
     expect(res.headers['x-correlation-id']).toBeDefined();

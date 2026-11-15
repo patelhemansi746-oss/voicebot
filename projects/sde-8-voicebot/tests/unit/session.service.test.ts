@@ -163,6 +163,17 @@ describe('SessionService - 7-State Lifecycle & Events', () => {
       expect(() =>
         service.updateSessionContext(session.id, { activeApplication: 'VSCode' })
       ).toThrow(AppError);
+
+      // Branch tests for non-existent IDs and edge cases
+      expect(() => service.startSession('non-existent')).toThrow(AppError);
+      expect(() => service.failSession('non-existent')).toThrow(AppError);
+      expect(() => service.failSession(session.id)).toThrow(AppError); // already completed
+      expect(() => service.transitionTo('non-existent', SessionStatus.ACTIVE)).toThrow(AppError);
+      expect(() => service.getSessionEvents('non-existent')).toThrow(AppError);
+
+      // Idempotent transition to same status
+      const s2 = service.createSession({ userId: 'dev-002' });
+      expect(service.transitionTo(s2.id, SessionStatus.CREATED).status).toBe(SessionStatus.CREATED);
     });
   });
 
