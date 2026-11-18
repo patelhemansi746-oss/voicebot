@@ -1,9 +1,10 @@
 /**
  * Workflow Orchestrator
  * Coordinates multi-step reasoning workflows across StateMachine, SafetyGate, ToolExecutor,
- * PlanValidator, and ErrorRecoveryEngine.
- * Implements Week 2: Plan validation, approval guards, timeouts, bounded idempotent retries, and cancellation.
- * Academia AI Voice Co-Pilot - SDE-8 Agentic Workflow System (Week 2)
+ * PlanValidator, ErrorRecoveryEngine, CheckpointManager, IdempotencyManager, and AuditTrail.
+ * Implements Week 1–3: Agentic state machine, safety gate, allow-list, timeouts, bounded retries,
+ * checkpoint/resume, step-level audit trail, progress events, and idempotency keys.
+ * Academia AI Voice Co-Pilot - SDE-8 Agentic Workflow System (Week 3)
  */
 
 import { EventEmitter } from 'node:events';
@@ -26,9 +27,16 @@ import { ErrorRecoveryEngine } from '../recovery/ErrorRecoveryEngine.js';
 import { PlanValidator } from '../validation/PlanValidator.js';
 import { ValidationOptions, PlanValidationResult } from '../types/validation.js';
 import { MockToolExecutor } from '../tools/MockToolExecutor.js';
+import { CheckpointManager } from '../checkpoint/CheckpointManager.js';
+import { IdempotencyManager } from '../safety/IdempotencyManager.js';
+import { AuditTrail } from '../audit/AuditTrail.js';
+import { AuditEventType } from '../types/audit.js';
+import { ProgressEvent } from '../types/progress.js';
+import { ResumeOptions, CheckpointStatus } from '../types/checkpoint.js';
 
 export interface ExecuteWorkflowOptions {
   validatePlan?: boolean;
+  checkpointAfterEachStep?: boolean;
 }
 
 export class WorkflowOrchestrator extends EventEmitter {
@@ -37,6 +45,9 @@ export class WorkflowOrchestrator extends EventEmitter {
   private toolExecutor: IToolExecutor;
   private recoveryEngine: ErrorRecoveryEngine;
   private planValidator: PlanValidator;
+  private checkpointManager: CheckpointManager;
+  private idempotencyManager: IdempotencyManager;
+  private auditTrail: AuditTrail;
   private abortController: AbortController = new AbortController();
   private isCancelled = false;
   private pendingApprovalResolvers: Map<
@@ -49,12 +60,18 @@ export class WorkflowOrchestrator extends EventEmitter {
     toolExecutor: IToolExecutor,
     safetyGate?: SafetyGate,
     recoveryEngine?: ErrorRecoveryEngine,
-    planValidator?: PlanValidator
+    planValidator?: PlanValidator,
+    checkpointManager?: CheckpointManager,
+    idempotencyManager?: IdempotencyManager,
+    auditTrail?: AuditTrail
   ) {
     super();
     this.toolExecutor = toolExecutor;
     this.safetyGate = safetyGate ?? new SafetyGate();
     this.recoveryEngine = recoveryEngine ?? new ErrorRecoveryEngine();
+    this.checkpointManager = checkpointManager ?? new CheckpointManager();
+    this.idempotencyManager = idempotencyManager ?? new IdempotencyManager();
+    this.auditTrail = auditTrail ?? new AuditTrail();
 
     const registry =
       'getRegistry' in toolExecutor
@@ -89,6 +106,18 @@ export class WorkflowOrchestrator extends EventEmitter {
     return this.planValidator;
   }
 
+  public getCheckpointManager(): CheckpointManager {
+    return this.checkpointManager;
+  }
+
+  public getIdempotencyManager(): IdempotencyManager {
+    return this.idempotencyManager;
+  }
+
+  public getAuditTrail(): AuditTrail {
+    return this.auditTrail;
+  }
+
   /**
    * Validate a WorkflowPlan against dependencies, cycles, and allow-listed tools
    */
@@ -96,39 +125,21 @@ export class WorkflowOrchestrator extends EventEmitter {
     return this.planValidator.validate(definition, options);
   }
 
-  /**
-   * Validate a WorkflowPlan or throw PlanValidationError
-   */
   public validatePlanOrThrow(definition: WorkflowPlan, options?: ValidationOptions): void {
     this.planValidator.validateOrThrow(definition, options);
   }
 
   /**
-   * Cancel an in-flight workflow execution
+   * Cancel an in-flight workflow execution mid-flight
    */
-  public async cancel(reason = 'Workflow execution cancelled by user'): Promise<void> {
+  public cancel(reason = 'Execution cancelled by user'): void {
     this.isCancelled = true;
     this.abortController.abort(reason);
-
-    // Resolve any awaiting approval promises as false
-    for (const [, resolver] of this.pendingApprovalResolvers.entries()) {
-      resolver.resolve(false);
-    }
-    this.pendingApprovalResolvers.clear();
-
-    if (this.stateMachine && this.stateMachine.canTransition(WorkflowEvent.ABORT)) {
-      await this.stateMachine.transition(WorkflowEvent.ABORT);
-    }
-
     this.emit('workflowCancelled', { reason });
   }
 
-  public isWorkflowCancelled(): boolean {
-    return this.isCancelled || this.abortController.signal.aborted;
-  }
-
   /**
-   * Submit human approval decision for a step currently paused in AWAITING_APPROVAL
+   * Submit human approval decision for an awaiting step
    */
   public submitApproval(stepId: string, approved: boolean, reason?: string): void {
     const resolver = this.pendingApprovalResolvers.get(stepId);
@@ -153,6 +164,38 @@ export class WorkflowOrchestrator extends EventEmitter {
   }
 
   /**
+   * Helper to emit progress events
+   */
+  private emitProgress(
+    context: WorkflowContext,
+    stepId: string,
+    stepIndex: number,
+    totalSteps: number,
+    status: 'running' | 'completed' | 'paused' | 'failed' | 'resumed',
+    currentStepName: string,
+    message: string
+  ): void {
+    const percentage = totalSteps > 0
+      ? Math.min(100, Math.max(0, Math.round((stepIndex / totalSteps) * 100)))
+      : 0;
+
+    const event: ProgressEvent = {
+      workflowId: context.workflowId,
+      executionId: `exec_${context.workflowId}_${context.startTime}`,
+      stepId,
+      stepIndex,
+      totalSteps,
+      percentage,
+      status,
+      currentStepName,
+      message,
+      timestamp: Date.now(),
+    };
+
+    this.emit('progress', event);
+  }
+
+  /**
    * Execute complete workflow from start to finish
    */
   public async executeWorkflow(
@@ -161,6 +204,7 @@ export class WorkflowOrchestrator extends EventEmitter {
     options?: ExecuteWorkflowOptions
   ): Promise<WorkflowResult> {
     const startTime = Date.now();
+    const executionId = `exec_${context.workflowId}_${context.startTime || startTime}`;
     this.executedCompensations = [];
     this.abortController = new AbortController();
     this.isCancelled = false;
@@ -169,12 +213,26 @@ export class WorkflowOrchestrator extends EventEmitter {
     // Forward state transitions to orchestrator events
     this.stateMachine.on('transition', (data) => this.emit('stateTransition', data));
 
+    // Audit record: Workflow Started
+    this.auditTrail.recordEvent(
+      AuditEventType.WORKFLOW_STARTED,
+      context.workflowId,
+      executionId,
+      { planId: definition.id, planName: definition.name, totalSteps: definition.steps.length }
+    );
+
     // Optional Plan Validation pre-check
     if (options?.validatePlan) {
       try {
         this.planValidator.validateOrThrow(definition);
       } catch (valErr) {
         const error = valErr instanceof Error ? valErr : new Error(String(valErr));
+        this.auditTrail.recordEvent(
+          AuditEventType.WORKFLOW_FAILED,
+          context.workflowId,
+          executionId,
+          { error: error.message, reason: 'PLAN_VALIDATION_ERROR' }
+        );
         const res: WorkflowResult = {
           workflowId: context.workflowId,
           finalState: WorkflowState.FAILED,
@@ -196,9 +254,21 @@ export class WorkflowOrchestrator extends EventEmitter {
     }
 
     const executedSteps: string[] = [];
+    const totalSteps = definition.steps.length;
     let currentStepId: string | undefined = definition.initialStepId;
     let stepCount = 0;
     const maxSteps = definition.maxExecutionSteps ?? 50;
+
+    // Initial progress event: 0%
+    this.emitProgress(
+      context,
+      definition.initialStepId,
+      0,
+      totalSteps,
+      'running',
+      'Initialization',
+      'Workflow started'
+    );
 
     try {
       await this.stateMachine.transition(WorkflowEvent.START);
@@ -218,10 +288,30 @@ export class WorkflowOrchestrator extends EventEmitter {
         }
 
         context.currentStepId = step.id;
+        const currentStepIndex = definition.steps.findIndex((s) => s.id === step.id);
+
         this.emit('stepStarted', { stepId: step.id, stepName: step.name, stepType: step.type });
 
+        // Audit & Progress: Step Started
+        this.auditTrail.recordEvent(
+          AuditEventType.STEP_STARTED,
+          context.workflowId,
+          executionId,
+          { stepType: step.type, description: step.description },
+          { stepId: step.id, stepName: step.name }
+        );
+        this.emitProgress(
+          context,
+          step.id,
+          currentStepIndex,
+          totalSteps,
+          'running',
+          step.name,
+          `Executing step ${step.name}`
+        );
+
         // Execute the step with state transitions & safety gates
-        const stepSuccess = await this.executeStep(step, context);
+        const stepSuccess = await this.executeStep(step, context, definition, executedSteps);
 
         if (!stepSuccess) {
           throw new Error(`Step '${step.id}' execution failed`);
@@ -229,6 +319,44 @@ export class WorkflowOrchestrator extends EventEmitter {
 
         executedSteps.push(step.id);
         this.emit('stepFinished', { stepId: step.id, stepName: step.name });
+
+        // Audit: Step Completed
+        this.auditTrail.recordEvent(
+          AuditEventType.STEP_COMPLETED,
+          context.workflowId,
+          executionId,
+          { output: context.stepResults[step.id] },
+          { stepId: step.id, stepName: step.name }
+        );
+
+        // Save progress checkpoint after each step
+        if (options?.checkpointAfterEachStep !== false) {
+          const checkpoint = await this.checkpointManager.saveCheckpoint(
+            definition,
+            context,
+            this.stateMachine.getState(),
+            step.id,
+            executedSteps
+          );
+          this.auditTrail.recordEvent(
+            AuditEventType.CHECKPOINT_SAVED,
+            context.workflowId,
+            executionId,
+            { checkpointId: checkpoint.checkpointId, stepId: step.id },
+            { stepId: step.id, stepName: step.name }
+          );
+        }
+
+        // Progress update after step completion
+        this.emitProgress(
+          context,
+          step.id,
+          currentStepIndex + 1,
+          totalSteps,
+          'running',
+          step.name,
+          `Completed step ${step.name}`
+        );
 
         // Check for cancellation after step
         if (this.isCancelled || this.abortController.signal.aborted) {
@@ -269,6 +397,23 @@ export class WorkflowOrchestrator extends EventEmitter {
         context,
       };
 
+      // Audit & Progress: Workflow Completed
+      this.auditTrail.recordEvent(
+        AuditEventType.WORKFLOW_COMPLETED,
+        context.workflowId,
+        executionId,
+        { durationMs: endTime - startTime, executedSteps }
+      );
+      this.emitProgress(
+        context,
+        'COMPLETED',
+        totalSteps,
+        totalSteps,
+        'completed',
+        'Done',
+        'Workflow completed successfully'
+      );
+
       this.emit('workflowCompleted', result);
       return result;
     } catch (err) {
@@ -278,6 +423,28 @@ export class WorkflowOrchestrator extends EventEmitter {
         level: 'ERROR',
         message: `Workflow aborted due to error: ${error.message}`,
       });
+
+      // Save Failure Checkpoint
+      const failedStep = context.currentStepId ?? 'unknown';
+      try {
+        const failCkpt = await this.checkpointManager.createFailureCheckpoint(
+          definition,
+          context,
+          this.stateMachine?.getState() ?? WorkflowState.FAILED,
+          failedStep,
+          executedSteps,
+          { message: error.message, code: this.isCancelled ? 'WORKFLOW_CANCELLED' : 'WORKFLOW_ERROR' }
+        );
+        this.auditTrail.recordEvent(
+          AuditEventType.CHECKPOINT_SAVED,
+          context.workflowId,
+          executionId,
+          { checkpointId: failCkpt.checkpointId, status: CheckpointStatus.FAILED },
+          { stepId: failedStep }
+        );
+      } catch {
+        // Safe fallback if checkpoint save fails during error
+      }
 
       // Execute Saga pattern compensations in reverse order
       if (this.executedCompensations.length > 0) {
@@ -289,17 +456,29 @@ export class WorkflowOrchestrator extends EventEmitter {
       }
 
       if (this.isCancelled || this.abortController.signal.aborted) {
-        if (this.stateMachine.canTransition(WorkflowEvent.ABORT)) {
+        if (this.stateMachine?.canTransition(WorkflowEvent.ABORT)) {
           await this.stateMachine.transition(WorkflowEvent.ABORT);
         }
-      } else if (this.stateMachine.canTransition(WorkflowEvent.FAIL)) {
+        this.auditTrail.recordEvent(
+          AuditEventType.WORKFLOW_CANCELLED,
+          context.workflowId,
+          executionId,
+          { error: error.message }
+        );
+      } else if (this.stateMachine?.canTransition(WorkflowEvent.FAIL)) {
         await this.stateMachine.transition(WorkflowEvent.FAIL, { error: error.message });
+        this.auditTrail.recordEvent(
+          AuditEventType.WORKFLOW_FAILED,
+          context.workflowId,
+          executionId,
+          { error: error.message, failedStep }
+        );
       }
 
       const endTime = Date.now();
       const result: WorkflowResult = {
         workflowId: context.workflowId,
-        finalState: this.stateMachine.getState(),
+        finalState: this.stateMachine?.getState() ?? WorkflowState.FAILED,
         success: false,
         startTime,
         endTime,
@@ -315,6 +494,304 @@ export class WorkflowOrchestrator extends EventEmitter {
         context,
       };
 
+      this.emitProgress(
+        context,
+        failedStep,
+        executedSteps.length,
+        totalSteps,
+        'failed',
+        'Failure',
+        `Workflow failed: ${error.message}`
+      );
+
+      this.emit('workflowFailed', result);
+      return result;
+    }
+  }
+
+  /**
+   * Resume workflow execution from a saved checkpoint.
+   * CRITICAL INVARIANT: Already completed steps are NEVER re-executed!
+   */
+  public async resumeWorkflow(
+    checkpointId: string,
+    options?: ResumeOptions
+  ): Promise<WorkflowResult> {
+    const checkpoint = await this.checkpointManager.getCheckpoint(checkpointId);
+    if (!checkpoint) {
+      throw new Error(`Checkpoint '${checkpointId}' was not found`);
+    }
+
+    const definition = checkpoint.plan;
+    if (options?.validatePlan) {
+      this.planValidator.validateOrThrow(definition);
+    }
+
+    const startTime = Date.now();
+    const executionId = `exec_${checkpoint.workflowId}_${startTime}_resumed`;
+    this.executedCompensations = [];
+    this.abortController = new AbortController();
+    this.isCancelled = false;
+
+    // Reconstruct context from checkpoint snapshot
+    const context: WorkflowContext = {
+      workflowId: checkpoint.workflowId,
+      name: definition.name,
+      userRequest: {
+        requestId: `req_resume_${Date.now()}`,
+        sessionId: `sess_resumed`,
+        intent: definition.name,
+        timestamp: Date.now(),
+      },
+      appContext: {
+        activeApplication: 'VS Code - Academia AI Co-Pilot',
+        windowTitle: 'Workspace (Resumed)',
+        visibleContent: 'Resumed execution context',
+      },
+      stepResults: { ...checkpoint.stepResults },
+      variables: { ...checkpoint.variables, ...(options?.overrideVariables || {}) },
+      currentStepId: checkpoint.stepId,
+      attemptsPerStep: { ...checkpoint.attemptsPerStep },
+      approvals: { ...checkpoint.approvals },
+      logs: [
+        {
+          timestamp: Date.now(),
+          level: 'INFO',
+          message: `Resuming workflow from checkpoint '${checkpointId}' at step '${checkpoint.stepId}'`,
+        },
+      ],
+      startTime: checkpoint.timestamp,
+    };
+
+    // Initialize state machine
+    this.stateMachine = new StateMachine(context, WorkflowState.IDLE);
+    this.stateMachine.on('transition', (data) => this.emit('stateTransition', data));
+
+    // Audit and progress: Workflow Resumed
+    this.auditTrail.recordEvent(
+      AuditEventType.WORKFLOW_RESUMED,
+      context.workflowId,
+      executionId,
+      {
+        fromCheckpointId: checkpointId,
+        resumedAtStepId: checkpoint.stepId,
+        completedStepIds: checkpoint.completedStepIds,
+      }
+    );
+    this.emit('workflowResumed', { checkpointId, checkpoint });
+
+    const executedSteps = [...checkpoint.completedStepIds];
+    const totalSteps = definition.steps.length;
+
+    // Determine starting step for resumption
+    let currentStepId: string | undefined;
+    const isAlreadyCompleted = checkpoint.completedStepIds.includes(checkpoint.stepId);
+
+    if (isAlreadyCompleted) {
+      // Checkpoint was saved after step finished; advance to next step
+      currentStepId = this.evaluateNextStep(checkpoint.stepId, definition.transitions, context);
+    } else {
+      // Checkpoint was saved before or during this step (e.g. pending approval or failed step)
+      currentStepId = checkpoint.stepId;
+    }
+
+    this.emitProgress(
+      context,
+      currentStepId ?? checkpoint.stepId,
+      executedSteps.length,
+      totalSteps,
+      'resumed',
+      'Resume',
+      `Workflow resumed from step ${currentStepId ?? checkpoint.stepId}`
+    );
+
+    let stepCount = executedSteps.length;
+    const maxSteps = definition.maxExecutionSteps ?? 50;
+
+    try {
+      await this.stateMachine.transition(WorkflowEvent.START);
+
+      while (currentStepId && stepCount < maxSteps) {
+        if (this.isCancelled || this.abortController.signal.aborted) {
+          throw new Error(
+            `Workflow cancelled: ${this.abortController.signal.reason || 'User cancelled'}`
+          );
+        }
+
+        // CRITICAL INVARIANT CHECK: Skip step if already completed in checkpoint
+        if (executedSteps.includes(currentStepId)) {
+          this.auditTrail.recordEvent(
+            AuditEventType.STEP_SKIPPED,
+            context.workflowId,
+            executionId,
+            { reason: 'Step was already completed prior to resume checkpoint' },
+            { stepId: currentStepId }
+          );
+          currentStepId = this.evaluateNextStep(currentStepId, definition.transitions, context);
+          continue;
+        }
+
+        stepCount++;
+        const step = definition.steps.find((s) => s.id === currentStepId);
+
+        if (!step) {
+          throw new Error(`Step '${currentStepId}' was not found in workflow definition`);
+        }
+
+        context.currentStepId = step.id;
+        const currentStepIndex = definition.steps.findIndex((s) => s.id === step.id);
+
+        this.emit('stepStarted', { stepId: step.id, stepName: step.name, stepType: step.type });
+
+        // Audit & Progress
+        this.auditTrail.recordEvent(
+          AuditEventType.STEP_STARTED,
+          context.workflowId,
+          executionId,
+          { stepType: step.type, description: step.description },
+          { stepId: step.id, stepName: step.name }
+        );
+        this.emitProgress(
+          context,
+          step.id,
+          currentStepIndex,
+          totalSteps,
+          'running',
+          step.name,
+          `Executing resumed step ${step.name}`
+        );
+
+        // Execute step
+        const stepSuccess = await this.executeStep(step, context, definition, executedSteps);
+
+        if (!stepSuccess) {
+          throw new Error(`Step '${step.id}' execution failed`);
+        }
+
+        executedSteps.push(step.id);
+        this.emit('stepFinished', { stepId: step.id, stepName: step.name });
+
+        // Audit: Step Completed
+        this.auditTrail.recordEvent(
+          AuditEventType.STEP_COMPLETED,
+          context.workflowId,
+          executionId,
+          { output: context.stepResults[step.id] },
+          { stepId: step.id, stepName: step.name }
+        );
+
+        // Save progress checkpoint
+        const postStepCheckpoint = await this.checkpointManager.saveCheckpoint(
+          definition,
+          context,
+          this.stateMachine.getState(),
+          step.id,
+          executedSteps
+        );
+        this.auditTrail.recordEvent(
+          AuditEventType.CHECKPOINT_SAVED,
+          context.workflowId,
+          executionId,
+          { checkpointId: postStepCheckpoint.checkpointId, stepId: step.id },
+          { stepId: step.id, stepName: step.name }
+        );
+
+        this.emitProgress(
+          context,
+          step.id,
+          currentStepIndex + 1,
+          totalSteps,
+          'running',
+          step.name,
+          `Completed step ${step.name}`
+        );
+
+        currentStepId = this.evaluateNextStep(step.id, definition.transitions, context);
+      }
+
+      // Transition to final RESPONDING -> COMPLETED
+      if (this.stateMachine.getState() !== WorkflowState.RESPONDING) {
+        if (this.stateMachine.canTransition(WorkflowEvent.RESPOND)) {
+          await this.stateMachine.transition(WorkflowEvent.RESPOND);
+        }
+      }
+
+      if (this.stateMachine.canTransition(WorkflowEvent.COMPLETE)) {
+        await this.stateMachine.transition(WorkflowEvent.COMPLETE);
+      }
+
+      const endTime = Date.now();
+      const result: WorkflowResult = {
+        workflowId: context.workflowId,
+        finalState: this.stateMachine.getState(),
+        success: true,
+        startTime,
+        endTime,
+        durationMs: endTime - startTime,
+        executedSteps,
+        outputs: { ...context.variables, ...context.stepResults },
+        context,
+      };
+
+      this.auditTrail.recordEvent(
+        AuditEventType.WORKFLOW_COMPLETED,
+        context.workflowId,
+        executionId,
+        { durationMs: endTime - startTime, executedSteps }
+      );
+      this.emitProgress(
+        context,
+        'COMPLETED',
+        totalSteps,
+        totalSteps,
+        'completed',
+        'Done',
+        'Workflow completed successfully after resume'
+      );
+
+      this.emit('workflowCompleted', result);
+      return result;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      const failedStep = context.currentStepId ?? 'unknown';
+
+      // Save failure checkpoint
+      try {
+        await this.checkpointManager.createFailureCheckpoint(
+          definition,
+          context,
+          this.stateMachine?.getState() ?? WorkflowState.FAILED,
+          failedStep,
+          executedSteps,
+          { message: error.message, code: 'WORKFLOW_RESUME_FAILURE' }
+        );
+      } catch {
+        // Safe fallback
+      }
+
+      if (this.stateMachine?.canTransition(WorkflowEvent.FAIL)) {
+        await this.stateMachine.transition(WorkflowEvent.FAIL, { error: error.message });
+      }
+
+      const endTime = Date.now();
+      const result: WorkflowResult = {
+        workflowId: context.workflowId,
+        finalState: this.stateMachine?.getState() ?? WorkflowState.FAILED,
+        success: false,
+        startTime,
+        endTime,
+        durationMs: endTime - startTime,
+        executedSteps,
+        outputs: { ...context.variables, ...context.stepResults },
+        error: {
+          stepId: context.currentStepId,
+          message: error.message,
+          code: 'WORKFLOW_RESUME_FAILURE',
+          stack: error.stack,
+        },
+        context,
+      };
+
       this.emit('workflowFailed', result);
       return result;
     }
@@ -323,7 +800,12 @@ export class WorkflowOrchestrator extends EventEmitter {
   /**
    * Executes a single workflow step respecting state machine transitions and safety gates
    */
-  private async executeStep(step: WorkflowStep, context: WorkflowContext): Promise<boolean> {
+  private async executeStep(
+    step: WorkflowStep,
+    context: WorkflowContext,
+    definition?: WorkflowPlan,
+    executedSteps: string[] = []
+  ): Promise<boolean> {
     switch (step.type) {
       case StepType.OBSERVATION:
         return this.executeObservationStep(step, context);
@@ -335,7 +817,7 @@ export class WorkflowOrchestrator extends EventEmitter {
         return this.executePlanningStep(step, context);
 
       case StepType.TOOL_EXECUTION:
-        return this.executeToolStep(step, context);
+        return this.executeToolStep(step, context, definition, executedSteps);
 
       case StepType.VERIFICATION:
         return this.executeVerificationStep(step, context);
@@ -344,10 +826,10 @@ export class WorkflowOrchestrator extends EventEmitter {
         return this.executeResponseStep(step, context);
 
       case StepType.HUMAN_APPROVAL:
-        return this.executeApprovalStep(step, context);
+        return this.executeApprovalStep(step, context, definition, executedSteps);
 
       default:
-        return this.executeToolStep(step, context);
+        return this.executeToolStep(step, context, definition, executedSteps);
     }
   }
 
@@ -396,14 +878,10 @@ export class WorkflowOrchestrator extends EventEmitter {
       await this.stateMachine.transition(WorkflowEvent.PLAN);
     }
 
-    if (step.toolName) {
-      await this.runToolWithRetry(step, context);
-    } else {
-      context.stepResults[step.id] = {
-        plan: `Plan decomposed for ${step.name}`,
-        readyForTool: true,
-      };
-    }
+    context.stepResults[step.id] = {
+      planCreated: true,
+      timestamp: Date.now(),
+    };
 
     if (this.stateMachine.canTransition(WorkflowEvent.PLAN_DONE)) {
       await this.stateMachine.transition(WorkflowEvent.PLAN_DONE);
@@ -411,7 +889,12 @@ export class WorkflowOrchestrator extends EventEmitter {
     return true;
   }
 
-  private async executeToolStep(step: WorkflowStep, context: WorkflowContext): Promise<boolean> {
+  private async executeToolStep(
+    step: WorkflowStep,
+    context: WorkflowContext,
+    definition?: WorkflowPlan,
+    executedSteps: string[] = []
+  ): Promise<boolean> {
     if (!step.toolName) {
       throw new Error(`Step '${step.id}' is of type TOOL_EXECUTION but has no toolName specified`);
     }
@@ -440,12 +923,45 @@ export class WorkflowOrchestrator extends EventEmitter {
         await this.stateMachine.transition(WorkflowEvent.REQUIRE_APPROVAL, approvalReq);
       }
 
+      // Save Pre-Approval Checkpoint so state is safe if paused/resumed
+      if (definition) {
+        try {
+          const preApprovalCkpt = await this.checkpointManager.saveCheckpoint(
+            definition,
+            context,
+            WorkflowState.AWAITING_APPROVAL,
+            step.id,
+            executedSteps,
+            { status: CheckpointStatus.ACTIVE, metadata: { awaitingApprovalForStep: step.id } }
+          );
+          this.auditTrail.recordEvent(
+            AuditEventType.CHECKPOINT_SAVED,
+            context.workflowId,
+            `exec_${context.workflowId}_${context.startTime}`,
+            { checkpointId: preApprovalCkpt.checkpointId, reason: 'PRE_APPROVAL_GATE' },
+            { stepId: step.id, stepName: step.name }
+          );
+        } catch {
+          // Non-blocking
+        }
+      }
+
+      this.auditTrail.recordEvent(
+        AuditEventType.APPROVAL_REQUESTED,
+        context.workflowId,
+        `exec_${context.workflowId}_${context.startTime}`,
+        { approvalId: approvalReq.approvalId, riskLevel, toolName: step.toolName },
+        { stepId: step.id, stepName: step.name }
+      );
+
       this.emit('approvalRequested', approvalReq);
 
       // Wait for approval response
       const approved = await new Promise<boolean>((resolve, reject) => {
         this.pendingApprovalResolvers.set(step.id, { resolve, reject });
       });
+
+      context.approvals[step.id] = approved;
 
       // Check if expired
       if (this.safetyGate.isExpired(approvalReq.approvalId)) {
@@ -454,6 +970,14 @@ export class WorkflowOrchestrator extends EventEmitter {
           level: 'WARN',
           message: `Approval for tool '${step.toolName}' in step '${step.id}' has EXPIRED. Expired actions never execute.`,
         });
+
+        this.auditTrail.recordEvent(
+          AuditEventType.APPROVAL_EXPIRED,
+          context.workflowId,
+          `exec_${context.workflowId}_${context.startTime}`,
+          { approvalId: approvalReq.approvalId },
+          { stepId: step.id, stepName: step.name }
+        );
 
         if (this.stateMachine.canTransition(WorkflowEvent.REJECT)) {
           await this.stateMachine.transition(WorkflowEvent.REJECT);
@@ -468,6 +992,16 @@ export class WorkflowOrchestrator extends EventEmitter {
           level: 'WARN',
           message: `User rejected execution of tool '${step.toolName}' in step '${step.id}'. Rejected actions never execute.`,
         });
+
+        this.safetyGate.getApprovalManager().reject(approvalReq.approvalId, 'User denied approval');
+
+        this.auditTrail.recordEvent(
+          AuditEventType.APPROVAL_REJECTED,
+          context.workflowId,
+          `exec_${context.workflowId}_${context.startTime}`,
+          { approvalId: approvalReq.approvalId, reason: 'User denied' },
+          { stepId: step.id, stepName: step.name }
+        );
 
         if (this.stateMachine.canTransition(WorkflowEvent.REJECT)) {
           await this.stateMachine.transition(WorkflowEvent.REJECT);
@@ -488,12 +1022,25 @@ export class WorkflowOrchestrator extends EventEmitter {
         return false;
       }
 
+      // Approved!
+      const decision = this.safetyGate.getApprovalManager().approve(approvalReq.approvalId);
+      this.auditTrail.recordEvent(
+        AuditEventType.APPROVAL_GRANTED,
+        context.workflowId,
+        `exec_${context.workflowId}_${context.startTime}`,
+        { approvalId: approvalReq.approvalId, decidedBy: decision.decidedBy },
+        { stepId: step.id, stepName: step.name }
+      );
+
       if (this.stateMachine.canTransition(WorkflowEvent.APPROVE)) {
         await this.stateMachine.transition(WorkflowEvent.APPROVE);
       }
     } else {
       if (this.stateMachine.canTransition(WorkflowEvent.EXECUTE_TOOL)) {
-        await this.stateMachine.transition(WorkflowEvent.EXECUTE_TOOL);
+        await this.stateMachine.transition(WorkflowEvent.EXECUTE_TOOL, {
+          toolName: step.toolName,
+          stepId: step.id,
+        });
       }
     }
 
@@ -560,13 +1107,20 @@ export class WorkflowOrchestrator extends EventEmitter {
     return true;
   }
 
-  private async executeApprovalStep(step: WorkflowStep, context: WorkflowContext): Promise<boolean> {
-    return this.executeToolStep(step, context);
+  private async executeApprovalStep(
+    step: WorkflowStep,
+    context: WorkflowContext,
+    definition?: WorkflowPlan,
+    executedSteps: string[] = []
+  ): Promise<boolean> {
+    return this.executeToolStep(step, context, definition, executedSteps);
   }
 
   /**
-   * Run tool execution wrapped with retry policy, timeout, and cancellation signal
+   * Run tool execution wrapped with retry policy, timeout, cancellation signal,
+   * and IDEMPOTENCY KEY caching.
    * Retries are bounded and executed ONLY for idempotent calls!
+   * Duplicate calls with identical idempotency keys return cached results and NEVER execute the tool!
    */
   private async runToolWithRetry(
     step: WorkflowStep,
@@ -578,6 +1132,57 @@ export class WorkflowOrchestrator extends EventEmitter {
     const params = paramsOverride ?? this.resolveParameters(step, context);
     const toolDef = this.toolExecutor.getTool(step.toolName!);
     const riskLevel = riskOverride ?? step.riskLevel ?? toolDef?.riskLevel ?? RiskLevel.B_LOW_RISK;
+
+    const callerKey =
+      (step.metadata?.idempotencyKey as string) ||
+      (context.variables?.[`${step.id}_idempotencyKey`] as string) ||
+      (context.variables?.idempotencyKey as string);
+
+    const idempotencyKey = this.idempotencyManager.computeKey(step.toolName!, params, {
+      workflowId: context.workflowId,
+      stepId: step.id,
+      callerKey,
+    });
+
+    const isIdempotent =
+      step.isIdempotent ??
+      toolDef?.isIdempotent ??
+      (riskLevel === RiskLevel.A_INFORMATIONAL);
+
+    // IDEMPOTENCY CHECK: Return cached result if already executed
+    if (step.isIdempotent || step.metadata?.idempotencyKey || step.metadata?.useIdempotency !== false) {
+      if (this.idempotencyManager.has(idempotencyKey)) {
+        const cached = this.idempotencyManager.get(idempotencyKey)!;
+        cached.executionCount++;
+        this.auditTrail.recordEvent(
+          AuditEventType.TOOL_INVOKED,
+          context.workflowId,
+          `exec_${context.workflowId}_${context.startTime}`,
+          {
+            toolName: step.toolName,
+            parameters: params,
+            cached: true,
+            idempotencyKey,
+            executionCount: cached.executionCount,
+          },
+          { stepId: step.id, stepName: step.name }
+        );
+
+        context.stepResults[step.id] = cached.result;
+        if (step.outputVariable) {
+          context.variables[step.outputVariable] = cached.result;
+        }
+
+        return {
+          success: true,
+          data: cached.result,
+          durationMs: 0,
+          timestamp: Date.now(),
+          requestId: 'idempotent_cached',
+          toolName: step.toolName!,
+        };
+      }
+    }
 
     const executeOperation = async () => {
       const request: ToolExecutionRequest = {
@@ -596,6 +1201,14 @@ export class WorkflowOrchestrator extends EventEmitter {
           toolDef?.requiredScopes,
       };
 
+      this.auditTrail.recordEvent(
+        AuditEventType.TOOL_INVOKED,
+        context.workflowId,
+        `exec_${context.workflowId}_${context.startTime}`,
+        { toolName: step.toolName, parameters: params, riskLevel, idempotencyKey },
+        { stepId: step.id, stepName: step.name }
+      );
+
       const result = await this.toolExecutor.execute(request);
       if (!result.success) {
         const err = new Error(result.error?.message ?? `Tool '${step.toolName}' failed`);
@@ -609,11 +1222,6 @@ export class WorkflowOrchestrator extends EventEmitter {
       let finalResult;
 
       // Bounded retries for idempotent calls ONLY
-      const isIdempotent =
-        step.isIdempotent ??
-        toolDef?.isIdempotent ??
-        (riskLevel === RiskLevel.A_INFORMATIONAL);
-
       if (step.retryPolicy && isIdempotent) {
         // Enforce bounded retries (cap at max 5)
         const boundedPolicy = {
@@ -635,6 +1243,17 @@ export class WorkflowOrchestrator extends EventEmitter {
           });
         }
         finalResult = await executeOperation();
+      }
+
+      // Record result in idempotency cache
+      if (step.isIdempotent || step.metadata?.idempotencyKey || step.metadata?.useIdempotency !== false) {
+        this.idempotencyManager.recordResult(
+          idempotencyKey,
+          step.toolName!,
+          params,
+          finalResult.data,
+          { workflowId: context.workflowId, stepId: step.id }
+        );
       }
 
       context.stepResults[step.id] = finalResult.data;
@@ -668,81 +1287,74 @@ export class WorkflowOrchestrator extends EventEmitter {
 
       return {
         success: false,
-        error: { code: 'STEP_EXECUTION_ERROR', message: error.message, isRetryable: false },
         durationMs: 0,
         timestamp: Date.now(),
         requestId: 'failed',
         toolName: step.toolName!,
+        error: {
+          code: (error as { code?: string }).code ?? 'TOOL_EXECUTION_ERROR',
+          message: error.message,
+        },
       };
     }
   }
 
-  private resolvePath(root: Record<string, unknown>, path: string): unknown {
-    return path.split('.').reduce<unknown>((acc, part) => {
-      if (acc !== null && typeof acc === 'object') {
-        return (acc as Record<string, unknown>)[part];
-      }
-      return undefined;
-    }, root);
-  }
-
+  /**
+   * Resolve dynamic step parameters from context or parameter function
+   */
   private resolveParameters(step: WorkflowStep, context: WorkflowContext): Record<string, unknown> {
     if (typeof step.toolParameters === 'function') {
       return step.toolParameters(context);
     }
-    if (step.toolParameters) {
-      const resolved: Record<string, unknown> = { ...step.toolParameters };
 
-      // Map inputs if specified
-      if (step.inputMapping) {
-        for (const [paramKey, varPath] of Object.entries(step.inputMapping)) {
-          if (varPath.startsWith('variables.')) {
-            resolved[paramKey] = this.resolvePath(
-              context.variables,
-              varPath.replace('variables.', '')
-            );
-          } else if (varPath.startsWith('stepResults.')) {
-            resolved[paramKey] = this.resolvePath(
-              context.stepResults,
-              varPath.replace('stepResults.', '')
-            );
-          } else {
-            resolved[paramKey] = this.resolvePath(context.variables, varPath);
-          }
+    if (!step.toolParameters) {
+      return {};
+    }
+
+    const resolved: Record<string, unknown> = { ...step.toolParameters };
+
+    // Apply input mappings if defined: { "paramName": "context.variableKey" }
+    if (step.inputMapping) {
+      for (const [targetParam, sourceKey] of Object.entries(step.inputMapping)) {
+        if (sourceKey in context.variables) {
+          resolved[targetParam] = context.variables[sourceKey];
+        } else if (sourceKey in context.stepResults) {
+          resolved[targetParam] = context.stepResults[sourceKey];
         }
       }
-      return resolved;
     }
-    return {};
+
+    return resolved;
   }
 
+  /**
+   * Evaluates conditional transitions to select the next workflow step
+   */
   private evaluateNextStep(
     currentStepId: string,
     transitions: WorkflowTransition[],
     context: WorkflowContext
   ): string | undefined {
-    const candidateTransitions = transitions.filter((t) => t.fromStepId === currentStepId);
+    const stepTransitions = transitions.filter((t) => t.fromStepId === currentStepId);
 
-    if (candidateTransitions.length === 0) {
+    if (stepTransitions.length === 0) {
       return undefined;
     }
 
     // Evaluate conditional transitions first
-    for (const transition of candidateTransitions) {
-      if (transition.condition) {
-        if (this.evaluateCondition(transition.condition, context)) {
-          return transition.toStepId;
-        }
+    for (const transition of stepTransitions) {
+      if (transition.condition && this.evaluateCondition(transition.condition, context)) {
+        return transition.toStepId;
       }
     }
 
     // Fall back to default transition
-    const defaultTransition = candidateTransitions.find((t) => t.isDefault || !t.condition);
-    return defaultTransition?.toStepId;
+    const defaultTransition = stepTransitions.find((t) => t.isDefault || !t.condition);
+    return defaultTransition ? defaultTransition.toStepId : undefined;
   }
 
   private evaluateCondition(
-    condition: NonNullable<WorkflowTransition['condition']>,
+    condition: import('../types/workflow.js').StepCondition,
     context: WorkflowContext
   ): boolean {
     if (condition.customEvaluator) {
@@ -753,30 +1365,56 @@ export class WorkflowOrchestrator extends EventEmitter {
       return true;
     }
 
-    let val: unknown;
-    if (condition.field.startsWith('variables.')) {
-      val = this.resolvePath(context.variables, condition.field.replace('variables.', ''));
-    } else if (condition.field.startsWith('stepResults.')) {
-      val = this.resolvePath(context.stepResults, condition.field.replace('stepResults.', ''));
-    } else {
-      val = this.resolvePath(context.variables, condition.field);
-    }
+    const actualValue = this.resolvePath(context as unknown as Record<string, unknown>, condition.field);
 
     switch (condition.operator) {
       case 'equals':
-        return val === condition.value;
+        return actualValue === condition.value;
       case 'notEquals':
-        return val !== condition.value;
+        return actualValue !== condition.value;
       case 'contains':
-        return typeof val === 'string' && String(val).includes(String(condition.value));
+        return String(actualValue).includes(String(condition.value));
       case 'greaterThan':
-        return typeof val === 'number' && val > Number(condition.value);
+        return Number(actualValue) > Number(condition.value);
       case 'lessThan':
-        return typeof val === 'number' && val < Number(condition.value);
+        return Number(actualValue) < Number(condition.value);
       case 'defined':
-        return val !== undefined && val !== null;
+        return actualValue !== undefined && actualValue !== null;
       default:
-        return true;
+        return false;
     }
+  }
+
+  private resolvePath(obj: Record<string, unknown>, path: string): unknown {
+    const effectivePath = path.startsWith('variables.') ? path.slice('variables.'.length) : path;
+
+    if (effectivePath.startsWith('stepResults.')) {
+      const rest = effectivePath.slice('stepResults.'.length);
+      const parts = rest.split('.');
+      let current: unknown = obj.stepResults;
+      for (const part of parts) {
+        if (current === null || current === undefined) return undefined;
+        current = (current as Record<string, unknown>)[part];
+      }
+      return current;
+    }
+
+    if (obj.variables && typeof obj.variables === 'object') {
+      const parts = effectivePath.split('.');
+      let current: unknown = obj.variables;
+      for (const part of parts) {
+        if (current === null || current === undefined) return undefined;
+        current = (current as Record<string, unknown>)[part];
+      }
+      if (current !== undefined) return current;
+    }
+
+    const parts = path.split('.');
+    let current: unknown = obj;
+    for (const part of parts) {
+      if (current === null || current === undefined) return undefined;
+      current = (current as Record<string, unknown>)[part];
+    }
+    return current;
   }
 }

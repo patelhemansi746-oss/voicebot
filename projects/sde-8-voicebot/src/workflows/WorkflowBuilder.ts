@@ -92,6 +92,8 @@ export class WorkflowBuilder {
       fallbackAction?: FallbackAction;
       compensationAction?: CompensationAction;
       timeoutMs?: number;
+      isIdempotent?: boolean;
+      metadata?: Record<string, unknown>;
     }
   ): this {
     return this.addStep({
@@ -108,6 +110,8 @@ export class WorkflowBuilder {
       fallbackAction: options?.fallbackAction,
       compensationAction: options?.compensationAction,
       timeoutMs: options?.timeoutMs,
+      isIdempotent: options?.isIdempotent,
+      metadata: options?.metadata,
     });
   }
 

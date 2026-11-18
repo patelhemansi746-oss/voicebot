@@ -2,7 +2,7 @@
  * Approval Manager
  * Manages human-in-the-loop approval lifecycle: PENDING, APPROVED, REJECTED, EXPIRED.
  * Enforces non-bypassable invariant: Rejected or expired actions NEVER execute.
- * Academia AI Voice Co-Pilot - SDE-8 Agentic Workflow System (Week 2)
+ * Academia AI Voice Co-Pilot - SDE-8 Agentic Workflow System (Week 2 & 3)
  */
 
 import { EventEmitter } from 'node:events';
@@ -35,6 +35,17 @@ export class ApprovalStateError extends Error {
   }
 }
 
+export class DuplicateApprovalDecisionError extends Error {
+  constructor(
+    public readonly approvalId: string,
+    public readonly existingStatus: ApprovalStatus,
+    message = `Approval request '${approvalId}' was already decided (${existingStatus}). Duplicate decision rejected.`
+  ) {
+    super(message);
+    this.name = 'DuplicateApprovalDecisionError';
+  }
+}
+
 export class ActionExecutionBlockedError extends Error {
   constructor(
     public readonly approvalId: string,
@@ -49,6 +60,23 @@ export class ActionExecutionBlockedError extends Error {
 export interface ApprovalManagerOptions {
   defaultTtlMs?: number;
   enforceDoubleConfirmation?: boolean;
+}
+
+export interface ApprovalStateInfo {
+  approvalId: string;
+  workflowId: string;
+  stepId: string;
+  toolName: string;
+  riskLevel: RiskLevel;
+  status: ApprovalStatus;
+  createdAt: number;
+  expiresAt?: number;
+  ttlRemainingMs: number;
+  isExpired: boolean;
+  parameters: Record<string, unknown>;
+  decision?: ApprovalDecision;
+  requiresDoubleConfirmation?: boolean;
+  confirmationCount?: number;
 }
 
 export class ApprovalManager extends EventEmitter {
@@ -181,6 +209,7 @@ export class ApprovalManager extends EventEmitter {
     options?: {
       approvedBy?: 'USER' | 'AUTO_POLICY';
       reason?: string;
+      throwOnDuplicate?: boolean;
     }
   ): ApprovalDecision {
     // 1. Check expiration first
@@ -203,8 +232,12 @@ export class ApprovalManager extends EventEmitter {
       );
     }
 
-    // If already approved, return decision
+    // If already approved, check duplicate policy
     if (request.status === ApprovalStatus.APPROVED && request.decision) {
+      if (options?.throwOnDuplicate) {
+        throw new DuplicateApprovalDecisionError(approvalId, request.status);
+      }
+      this.emit('duplicateApprovalIgnored', { approvalId, status: request.status });
       return request.decision;
     }
 
@@ -255,8 +288,17 @@ export class ApprovalManager extends EventEmitter {
   public reject(
     approvalId: string,
     reason = 'Action rejected by user',
-    rejectedBy: 'USER' | 'AUTO_POLICY' = 'USER'
+    options?:
+      | 'USER'
+      | 'AUTO_POLICY'
+      | {
+          rejectedBy?: 'USER' | 'AUTO_POLICY';
+          throwOnDuplicate?: boolean;
+        }
   ): ApprovalDecision {
+    const rejectedBy = typeof options === 'string' ? options : options?.rejectedBy ?? 'USER';
+    const throwOnDuplicate = typeof options === 'object' ? options?.throwOnDuplicate : false;
+
     // 1. Check expiration
     if (this.isExpired(approvalId)) {
       const req = this.getRequest(approvalId)!;
@@ -266,6 +308,24 @@ export class ApprovalManager extends EventEmitter {
     const request = this.getRequest(approvalId);
     if (!request) {
       throw new Error(`Approval request '${approvalId}' not found`);
+    }
+
+    // Cannot reject already approved
+    if (request.status === ApprovalStatus.APPROVED) {
+      throw new ApprovalStateError(
+        approvalId,
+        request.status,
+        `Cannot reject request: action was already APPROVED.`
+      );
+    }
+
+    // If already rejected, check duplicate policy
+    if (request.status === ApprovalStatus.REJECTED && request.decision) {
+      if (throwOnDuplicate) {
+        throw new DuplicateApprovalDecisionError(approvalId, request.status);
+      }
+      this.emit('duplicateApprovalIgnored', { approvalId, status: request.status });
+      return request.decision;
     }
 
     request.status = ApprovalStatus.REJECTED;
@@ -346,6 +406,47 @@ export class ApprovalManager extends EventEmitter {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Query structured backend approval state for an approval request
+   */
+  public getApprovalState(approvalId: string): ApprovalStateInfo | null {
+    this.isExpired(approvalId);
+    const req = this.getRequest(approvalId);
+    if (!req) return null;
+
+    const now = Date.now();
+    const ttlRemainingMs = req.expiresAt ? Math.max(0, req.expiresAt - now) : 0;
+    return {
+      approvalId: req.approvalId,
+      workflowId: req.workflowId,
+      stepId: req.stepId,
+      toolName: req.toolName,
+      riskLevel: req.riskLevel,
+      status: req.status ?? ApprovalStatus.PENDING,
+      createdAt: req.createdAt,
+      expiresAt: req.expiresAt,
+      ttlRemainingMs,
+      isExpired: req.status === ApprovalStatus.EXPIRED || (req.expiresAt ? now > req.expiresAt : false),
+      parameters: req.parameters,
+      decision: req.decision,
+      requiresDoubleConfirmation: req.requiresDoubleConfirmation,
+      confirmationCount: req.confirmationCount,
+    };
+  }
+
+  /**
+   * List all approvals (pending + historical), optionally filtered by workflow
+   */
+  public listApprovals(workflowId?: string): ApprovalRequest[] {
+    this.checkAndExpireAll();
+    const all = [
+      ...Array.from(this.pendingApprovals.values()),
+      ...Array.from(this.approvalHistory.values()),
+    ];
+    if (!workflowId) return all;
+    return all.filter((a) => a.workflowId === workflowId);
   }
 
   public getRequest(approvalId: string): ApprovalRequest | undefined {

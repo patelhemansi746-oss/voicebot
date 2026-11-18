@@ -14,6 +14,7 @@
     "test:coverage": "vitest run --coverage",
     "demo": "tsx src/demo/cli-demo.ts",
     "demo:week2": "tsx src/demo/week2-demo.ts",
+    "demo:week3": "tsx src/demo/week3-demo.ts",
     "demo:ui": "tsx src/demo/server.ts"
   },
   "keywords": [

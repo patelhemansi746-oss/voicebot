@@ -1,50 +1,45 @@
-# Pull Request: Agentic Workflow Validation, Allow-listed Tool Registry, Approvals & Safe Executor (Week 2)
+# Pull Request: Agentic Workflow Checkpoint & Resume, Audit Trail & Approval Integration (Week 3)
 
 **Repository:** `https://github.com/Yashuudevang/acd_voicebot`  
-**Source Branch:** `feat-week-2-safe-executor`  
+**Source Branch:** `feat-week-3-checkpoint-resume`  
 **Target Branch:** `team/sde-8-voicebot` (or `develop`)  
 **Project Path:** `projects/sde-8-voicebot/` (root workspace)  
 **Author:** Hemansi (Voicebot Engineering Team)  
-**Title:** `feat(week-2): Agentic Workflow Validation, Allow-listed Tool Registry, Approval Gate & Safe Executor`  
+**Title:** `feat(week-3): Checkpoint & Resume, Audit Trail, Idempotency & Reasoning Approval Integration`  
 **Status:** Ready for Review & Grading  
 
 ---
 
-## 📌 Executive Summary & Specification Alignment (Week 2)
+## 📌 Executive Summary & Specification Alignment (Week 3 / W4)
 
-This pull request completes the **Week 2 Agentic Workflow Engineering Milestones** (Days 8 through 14) for the **Academia AI Voice Co-Pilot**, delivering a production-grade, highly secure execution environment with strict safety guarantees:
+This pull request completes the **Week 3 Agentic Workflow Engineering Milestones** (Days 15 through 21) for the **Academia AI Voice Co-Pilot**, making workflows fully observable, recoverable, and wired to upstream reasoning proposals, backend approval states, and UI interactions:
 
-1. **Plan Validation & Cycle Detection (`PlanValidator`)**:
-   - **Dependency Validation**: Verifies that every referenced prerequisite step (`dependencies` or `dependsOn`), initial step (`initialStepId`), and transition step (`fromStepId` / `toStepId`) actually exists within the workflow plan. Missing dependencies are rejected with explicit, actionable error messages.
-   - **Cycle Detection**: Employs a 3-color directed graph Depth-First Search (DFS) algorithm to detect and reject direct cycles ($A \to B \to A$), indirect multi-step cycles ($A \to B \to C \to A$), and self-dependency loops ($A \to A$). Cycle errors report the exact path sequence (e.g. `step_init -> step_b -> step_init`).
-   - **Allow-listed Tool Pre-Validation**: Automatically inspects every `TOOL_EXECUTION` step in the plan to guarantee that referenced tools are registered and allow-listed prior to execution.
+1. **Checkpoint and Resume (`CheckpointManager`)**:
+   - **Snapshot Persistence**: Saves complete serializable execution snapshots (`context.variables`, completed step results, execution progress, state machine state) after step completions and before approval gates.
+   - **CRITICAL INVARIANT — Completed Steps Are NEVER Re-executed**: On resumption, the orchestrator detects completed steps from the checkpoint and skips them deterministically. Completed tools are called **EXACTLY ZERO TIMES** during recovery.
+   - **Failed-Step Recovery**: When an unexpected or transient node error occurs, a failure checkpoint is recorded. After error resolution, execution resumes from the failed step onward without re-executing preceding steps.
 
-2. **Allow-listed Tool Registry with Permission Scopes (`ToolRegistry`)**:
-   - **Allow-list Enforcement**: Maintains an explicit allow-list strictly restricted to harmless mock tools (`calculator` and `summarize_text`) by default. Unregistered or unlisted tools cannot be executed.
-   - **Absolute Safety Invariants**: Unrestricted computer control (`exec`, `bash`, `shell`, `terminal`, `powershell`, `mouse`, `keyboard`) and external sending (`send_email`, `smtp`, `send_external`, `http_post_external`) are **strictly blocked and forbidden** from registration or execution with `DangerousToolForbiddenError`.
-   - **Schema Argument Validation**: Validates runtime parameters against JSON-like schema definitions for required fields, exact types (`string`, `number`, `boolean`, `object`, `array`), and enum constraints.
-   - **Permission Scopes Enforcement**: Tools declare required permission scopes (`tool.requiredScopes`). Execution requires callers to possess matching scopes, with full support for exact scopes, hierarchical wildcard scopes (e.g., `tools:*`), and global scopes (`*`).
+2. **Idempotency Keys (`IdempotencyManager`)**:
+   - **Deterministic Parameter Hashing**: Computes normalized SHA-256 parameter hashes invariant to JSON key ordering.
+   - **Duplicate Invocations Prevented**: When a step or tool execution is requested with an identical idempotency key, cached results are returned immediately. The underlying tool handler is called **EXACTLY ONCE**.
 
-3. **Approval Gate & Human-in-the-Loop Approval Manager (`ApprovalManager`, `SafetyGate`)**:
-   - **Approval Lifecycle**: Formal state tracking through `PENDING` $\to$ `APPROVED` | `REJECTED` | `EXPIRED`.
-   - **Time-To-Live (TTL) & Expiration**: Configurable TTL per approval request. Expired requests can never be approved and trigger `ApprovalExpiredError`.
-   - **CRITICAL INVARIANT — Rejected or Expired Actions NEVER Execute**: Both the workflow orchestrator and the tool executor enforce non-bypassable guards. If an action is rejected or expired, execution is halted immediately and tool mock handlers are called **EXACTLY ZERO TIMES**, verified by automated test spies.
-   - **Double Confirmation**: High-risk actions (Category D) support strict multi-step double confirmation.
+3. **Step-Level Cryptographic Audit Trail (`AuditTrail`)**:
+   - **Observable Execution History**: Records an immutable, append-only record for every step and lifecycle event (`WORKFLOW_STARTED`, `STEP_STARTED`, `STEP_COMPLETED`, `APPROVAL_REQUESTED`, `APPROVAL_GRANTED`, `APPROVAL_REJECTED`, `CHECKPOINT_SAVED`, `WORKFLOW_RESUMED`, `TOOL_INVOKED`, etc.).
+   - **Cryptographic SHA-256 Hash Chaining**: Every record references `previousHash` and computes `hash` over its payload. `verifyIntegrity()` detects any unauthorized modification to sequence, timestamp, or data payload.
 
-4. **Safe Executor (`SafeExecutor`, `MockToolExecutor`)**:
-   - **Timeouts**: Hard timeouts per-step and per-tool using promise race timers and clean cancellation cleanup.
-   - **Bounded Retries for IDEMPOTENT Calls ONLY**: Restricts automatic exponential backoff retries strictly to idempotent operations (`isIdempotent: true`, such as numeric calculation or text summarization). Mutating, side-effect, or non-idempotent tools (`isIdempotent: false`) fail on attempt 1 with zero retries permitted to eliminate duplicate side effects.
-   - **Cancellation**: Full cancellation support via `cancel(executionId)` and `AbortController` signals, safely interrupting in-flight tasks and skipping remaining steps.
+4. **Progress Events Emitter**:
+   - Monotonic 0% to 100% progress events emitted at workflow boundaries and step completions.
+   - Emits step ID, status (`running`, `completed`, `paused`, `failed`, `resumed`), percentage, and human-readable descriptions.
 
-5. **Exhaustive Automated Test Suite**:
-   - **85 automated tests** across 7 test suites (100% passing).
-   - **90.47% Line Coverage** and **84.04% Branch Coverage** (>80% required across all modules).
-   - 32 dedicated policy tests in `tests/policy.test.ts` covering every Week 2 acceptance criterion.
+5. **Reasoning Proposals (`ProposalManager`)**:
+   - Ingests `WorkflowProposal` generated from upstream voice recognition and LLM reasoning.
+   - Pre-validates the proposed `WorkflowPlan` using `PlanValidator` (acyclicity, dependencies, allow-list) before execution begins.
+   - Rejects broken or cyclic proposals with actionable error messages.
 
-6. **Interactive Live Demos**:
-   - `npm run demo:week2`: Live terminal demo showcasing Plan Validation, Allow-listed Tools & Scopes, Side-by-side Approved vs. Rejected Plan, and Safe Executor features.
-   - `npm run demo`: Week 1 live interactive terminal demo.
-   - `npm run demo:ui`: Web visualizer dashboard.
+6. **Backend Approval State & Defense**:
+   - Exposes queryable backend approval states (`getApprovalState(approvalId)`) with TTL remaining countdowns and status inspection.
+   - **Duplicate Approval Defense**: Calling approve/reject multiple times is safely handled and never triggers extra executions.
+   - **Expired Approval Defense**: Expired approvals trigger `ApprovalExpiredError` and **NEVER execute tools (0 invocations)**.
 
 ---
 
@@ -52,57 +47,57 @@ This pull request completes the **Week 2 Agentic Workflow Engineering Milestones
 
 | Milestone | Deliverable | Acceptance Criteria | Status | Evidence |
 |:---|:---|:---|:---:|:---|
-| **D8–9** | **Plan Validator** | Plans with missing dependencies or cycles are rejected with clear errors | ✅ **PASS** | `PlanValidator.validate()` detects missing dependencies and cycles; 10 unit tests in `tests/policy.test.ts`. |
-| **D8–9** | **Tool Registry** | Only allow-listed tools run; arguments validated against schemas; permission scopes enforced | ✅ **PASS** | `ToolRegistry` enforces allow-list, schema validation, and scope verification (`checkPermissionScopes`); blocks dangerous tools. |
-| **D10–11** | **Approval Manager** | Approve / reject / expiry work; a rejected or expired action never executes | ✅ **PASS** | `ApprovalManager` handles full lifecycle; verified that tool mock handlers are invoked **0 times** when rejected/expired. |
-| **D12–13** | **Safe Executor** | Executor has timeouts, bounded retries for idempotent calls only, and cancellation | ✅ **PASS** | `SafeExecutor` and `MockToolExecutor` enforce hard timeouts, zero retries for non-idempotent tools, and `AbortSignal` cancellation. |
-| **D14** | **Policy Tests** | Comprehensive policy test suite passes with >80% coverage | ✅ **PASS** | 85 tests passing; **90.47% lines, 84.04% branches**. |
-| **D14** | **Live Demos** | Demo shows approved vs rejected plan | ✅ **PASS** | `npm run demo:week2` runs Part A (Approved) vs Part B (Rejected) showing 0 tool executions on rejection. |
+| **D15–16** | **Checkpoint & Resume** | A workflow can checkpoint and resume after a failure; recovery does not re-run completed steps; idempotency keys prevent duplicate execution | ✅ **PASS** | `CheckpointManager` snapshots state; `resumeWorkflow()` skips completed steps; `IdempotencyManager` caches tool calls; 8 tests in `tests/checkpoint-resume.test.ts`. |
+| **D17–18** | **Audit Trail & Progress** | Every step writes an audit record and emits progress events | ✅ **PASS** | `AuditTrail` maintains SHA-256 hash chaining; monotonic 0–100% progress events verified in `tests/audit-progress.test.ts`. |
+| **D19–20** | **Reasoning & Approvals** | WorkflowProposals from reasoning are accepted, approval state is read from backend, and UI can approve/reject | ✅ **PASS** | `ProposalManager` validates proposals; `ApprovalManager.getApprovalState()` exposes TTL & status; verified in `tests/reasoning-approvals.test.ts`. |
+| **D19–20** | **Approval Invariants** | Tests prove duplicate and expired approvals never execute a tool | ✅ **PASS** | Spies verify tool mock handlers are called **0 times on expired approvals** and **exactly 1 time on duplicate approvals**. |
+| **D21** | **Integration Evidence** | Day 21 team gate: complete session flows through voice, reasoning, policy, backend and UI | ✅ **PASS** | Full integration test passes in `tests/integration-w4.test.ts`; live demo runnable via `npm run demo:week3`. |
+| **D21** | **Safety & Policies** | Only harmless mock tools exist; tests pass in mock mode; PR includes test output; demo given | ✅ **PASS** | 108 tests passing; **89.88% line coverage, 82.82% branch coverage**; mock mode default. |
 
 ---
 
-## 🏗️ Architecture: Safe Execution & Policy Enforcement
+## 🏗️ Architecture: Checkpoint, Resume & Audit Pipeline
 
 ```mermaid
-graph TD
-    UserVoice([User Voice Command]) --> Plan[WorkflowPlan Definition]
-    Plan --> Validator[PlanValidator]
+flowchart TD
+    UserVoice([User Voice Command]) --> Transcription[Transcription Engine]
+    Transcription --> Reasoning[Reasoning Proposal Engine]
+    Reasoning --> Proposal[WorkflowProposal Definition]
     
-    subgraph ValidationStage [Phase 1: Validation Gate]
-        Validator -->|Check Dependencies| DepCheck{Dependencies Exist?}
-        DepCheck -->|Missing Dependency| RejectPlan[Reject Plan with Clear Error]
-        DepCheck -->|Valid| CycleCheck{Cycles in DAG?}
-        CycleCheck -->|Cycle Detected: A->B->A| RejectPlan
-        CycleCheck -->|Acyclic DAG| ToolCheck{Allow-listed Tools?}
-        ToolCheck -->|Unregistered Tool| RejectPlan
-        ToolCheck -->|Allow-listed| SafePlan[Validated Safe Plan]
+    subgraph ValidationStage [Phase 1: Validation & Ingestion]
+        Proposal --> Validator[PlanValidator]
+        Validator -->|Check Dependencies, Cycles & Allow-list| GateCheck{Valid DAG?}
+        GateCheck -->|Invalid| RejectProposal[Reject Proposal with Error]
+        GateCheck -->|Valid| Orchestrator[WorkflowOrchestrator]
     end
     
-    subgraph ExecutionStage [Phase 2: Safe Orchestration & Policies]
-        SafePlan --> Orchestrator[WorkflowOrchestrator / SafeExecutor]
-        Orchestrator --> SafetyGate[Safety Gate & ApprovalManager]
+    subgraph ExecutionStage [Phase 2: Execution, Checkpoints & Audit]
+        Orchestrator --> AuditLog[(AuditTrail: SHA-256 Hash Chain)]
+        Orchestrator --> ProgressStream[Progress Events: 0% -> 100%]
         
-        SafetyGate -->|Risk Level A/B| RunTool[Prepare Tool Execution]
-        SafetyGate -->|Risk Level C/D| ApprovalCheck{Human Approval}
+        Orchestrator --> StepExec[Step Execution]
+        StepExec --> IdemCheck{Idempotency Key Cached?}
+        IdemCheck -->|Yes: Key Hit| ReturnCached[Return Cached Output (0 Tool Runs)]
+        IdemCheck -->|No: First Call| ToolExecution[Execute Safe Harmless Tool]
         
-        ApprovalCheck -->|Expired TTL| BlockExpired[BLOCK EXECUTION: 0 Invocations]
-        ApprovalCheck -->|User Rejects| BlockRejected[BLOCK EXECUTION: 0 Invocations]
-        ApprovalCheck -->|User Approves| RunTool
-        
-        RunTool --> ScopeCheck{Caller Has Scopes?}
-        ScopeCheck -->|Missing Scopes| DenyScope[PermissionScopeError]
-        ScopeCheck -->|Valid Scopes| ParamCheck{Schema Match?}
-        ParamCheck -->|Invalid Params| ParamError[ParamValidationError]
-        ParamCheck -->|Valid Params| Executor[Safe Tool Execution]
+        StepExec --> PostCkpt[(CheckpointManager: Save Step Snapshot)]
     end
     
-    subgraph SafeExecutorGuards [Phase 3: Executor Safeguards]
-        Executor --> TimeoutGuard[Hard Timeout Guard]
-        Executor --> CancelGuard[Cancellation AbortSignal]
-        Executor --> IdempotencyCheck{Is Tool Idempotent?}
+    subgraph ApprovalStage [Phase 3: Backend Approval Gate]
+        StepExec --> RiskCheck{Risk Level C or D?}
+        RiskCheck -->|Yes| PreApprCkpt[(Save Pre-Approval Checkpoint)]
+        PreApprCkpt --> ApprovalGate[ApprovalManager: PENDING with TTL]
+        ApprovalGate --> WebUI[Web UI / REST API / SSE]
         
-        IdempotencyCheck -->|Yes: calculator / summarize| BoundedRetry[Bounded Retries (Max 3)]
-        IdempotencyCheck -->|No: mutating / side-effects| SingleAttempt[Single Attempt ONLY (0 Retries)]
+        WebUI -->|Approve| ProceedExec[Resume Tool Execution]
+        WebUI -->|Reject| BlockExec[Block: 0 Invocations]
+        ApprovalGate -->|TTL Elapsed| ExpireBlock[Expired: 0 Invocations]
+    end
+    
+    subgraph RecoveryStage [Phase 4: Fault Recovery]
+        StepExec -->|Step Fails| FailCkpt[(Save Failure Checkpoint)]
+        FailCkpt --> Resume[Resume from Checkpoint]
+        Resume -->|Skip Completed Steps| StepExec
     end
 ```
 
@@ -111,9 +106,9 @@ graph TD
 ## 🧪 Acceptance Criteria Verification & Test Output
 
 ### 1. Test Summary
-- **Test Files:** 7 passed (7)
-- **Tests:** 85 passed (85)
-- **Duration:** 2.17s
+- **Test Files:** 11 passed (11 total)
+- **Tests:** 108 passed (108 total)
+- **Duration:** 2.65s
 
 ### 2. Coverage Report (v8)
 ```text
@@ -121,155 +116,169 @@ graph TD
 -------------------|---------|----------|---------|---------|-------------------
 File               | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s 
 -------------------|---------|----------|---------|---------|-------------------
-All files          |   90.47 |    84.04 |    85.2 |   90.47 |                   
+All files          |   89.88 |    82.82 |   82.73 |   89.88 |                   
+ audit             |   84.37 |     90.9 |      80 |   84.37 |                   
+  AuditTrail.ts    |   84.37 |     90.9 |      80 |   84.37 | ...35-141,182-192 
+ checkpoint        |   88.18 |    88.46 |   72.22 |   88.18 |                   
+  ...intManager.ts |   88.18 |    88.46 |   72.22 |   88.18 | ...77-178,184-185 
+ reasoning         |   89.65 |    93.75 |   66.66 |   89.65 |                   
+  ...salManager.ts |   89.65 |    93.75 |   66.66 |   89.65 | ...,47-48,125-126 
  recovery          |    99.4 |    85.29 |     100 |    99.4 |                   
   ...veryEngine.ts |    99.4 |    85.29 |     100 |    99.4 | 152               
- safety            |   89.93 |    89.34 |   81.08 |   89.93 |                   
-  ...valManager.ts |    90.2 |    85.52 |   76.19 |    90.2 | ...68,371-373,388 
-  SafetyGate.ts    |   89.44 |    95.65 |    87.5 |   89.44 | ...66-174,218-221 
- scheduler         |   88.75 |    77.82 |      80 |   88.75 |                   
+ safety            |   89.14 |     85.8 |   81.63 |   89.14 |                   
+  ...valManager.ts |   89.65 |       81 |   79.16 |   89.65 | ...69,472-474,489 
+  ...ncyManager.ts |   86.66 |    88.23 |   77.77 |   86.66 | 54-55,113-122     
+  SafetyGate.ts    |   89.44 |    95.55 |    87.5 |   89.44 | ...66-174,218-221 
+ scheduler         |   87.87 |    75.08 |   77.77 |   87.87 |                   
   SafeExecutor.ts  |   79.24 |    80.48 |   58.33 |   79.24 | ...24-225,244-254 
-  ...chestrator.ts |   89.35 |    75.32 |   82.14 |   89.35 | ...53-754,762-763 
+  ...chestrator.ts |   87.91 |    72.35 |   78.12 |   87.91 | ...1323,1365-1366 
   ...wScheduler.ts |     100 |    85.71 |     100 |     100 | 94,120,140-146    
  state-machine     |   94.51 |    88.46 |   87.09 |   94.51 |                   
   StateMachine.ts  |    93.3 |    83.33 |    90.9 |    93.3 | ...01-202,231-232 
   ...itionTable.ts |   96.63 |      100 |   77.77 |   96.63 | 146-147,162-163   
- tools             |   87.05 |       83 |   88.37 |   87.05 |                   
-  ...olExecutor.ts |   82.61 |     78.4 |      90 |   82.61 | ...87,333,393-394 
+ tools             |   89.39 |    83.11 |   88.37 |   89.39 |                   
+  ...olExecutor.ts |   86.39 |    78.65 |      90 |   86.39 | ...87,333,393-394 
   ToolRegistry.ts  |   93.23 |    89.23 |   86.95 |   93.23 | ...47-248,251-252 
   ...t-in-tools.ts |     100 |      100 |     100 |     100 |                   
  validation        |   91.18 |    88.88 |   91.66 |   91.18 |                   
   PlanValidator.ts |   91.18 |    88.88 |   91.66 |   91.18 | ...98-304,316-322 
- workflows         |   95.93 |    90.62 |      90 |   95.93 |                   
-  ...lowBuilder.ts |   93.65 |     92.3 |   86.66 |   93.65 | ...,36-38,153-154 
+ workflows         |   95.97 |    91.17 |      90 |   95.97 |                   
+  ...lowBuilder.ts |   93.75 |    92.85 |   86.66 |   93.75 | ...,36-38,157-158 
   ...-workflows.ts |     100 |    83.33 |     100 |     100 | 28                
 -------------------|---------|----------|---------|---------|-------------------
 ```
 
 ---
 
-## 🎬 Live Demo Output (`npm run demo:week2`)
+## 🎬 Live Demo Output (`npm run demo:week3`)
 
 ```text
-╔════════════════════════════════════════════════════════════════════════════╗
-║   Academia AI Voice Co-Pilot — Week 2 Safe Workflow Engine Live Demo       ║
-╚════════════════════════════════════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════════════════════════════════╗
+║   Academia AI Voice Co-Pilot — Week 3 Safe Workflow Engine Live Demo           ║
+║   Checkpoint/Resume, Audit Trail, Idempotency & Backend Approval State         ║
+╚════════════════════════════════════════════════════════════════════════════════╝
 
-==============================================================================
-DEMO 1: Plan Validator — Missing Dependencies & Cycle Detection (D8-9)
-Validates workflow structures before execution; rejects invalid graphs with clear errors
-==============================================================================
+================================================================================
+  DEMO 1: Checkpoint & Resume after Failure (D15-16)
+================================================================================
+Demonstrates: When a workflow encounters a step failure, a snapshot checkpoint is saved.
+Resumption continues from the failed step WITHOUT re-running completed steps.
 
-[Case 1A] Validating Cyclic & Broken Dependency Plan:
-  Plan Valid: NO (REJECTED)
-  Detected Errors (2):
-    ✖ [MISSING_STEP_DEPENDENCY] Step 'step_b' depends on missing step 'phantom_step_xyz'
-    ✖ [DEPENDENCY_CYCLE_DETECTED] Dependency cycle detected: step_init -> step_b -> step_init
+----------------------------------------------------------------------
+  Run 1: Initial Execution (Encountering Step 2 Failure)
+----------------------------------------------------------------------
+  Initial Run Outcome: FAILED (Expected)
+  Failed at Step: 'step_2_calc' - Reason: Step 'step_2_calc' execution failed
+  ✔ Failure Checkpoint Saved: 'ckpt_fail_wf_demo_recovery_step_2_calc_1795008031241'
+    Completed Steps Stored in Checkpoint: [step_1_init]
 
-[Case 1B] Validating Clean DAG Plan:
-  Plan Valid: YES (ACCEPTED)
-  Errors: 0 — Plan is structurally sound and ready for safe execution.
+----------------------------------------------------------------------
+  Run 2: Resuming from Checkpoint after Node Recovery
+----------------------------------------------------------------------
+  Simulating node recovery: clearing transient error...
 
-==============================================================================
-DEMO 2: Allow-listed Tool Registry & Permission Scopes (D8-9)
-Only allow-listed harmless tools run; dangerous tools strictly forbidden; permission scopes enforced
-==============================================================================
-  Allow-listed Harmless Tools: [calculator, summarize_text]
+  Resumed Run Outcome: COMPLETED SUCCESSFULLY
+  Final Executed Steps: [step_1_init, step_2_calc, step_3_finalize]
+  ✔ CRITICAL INVARIANT: Step 1 re-run count: 0 (NEVER RE-EXECUTED)
+  Outputs Available: [ 'normalizedScore', 'step_1_init', 'step_2_calc', 'step_3_finalize' ]
 
-  Checking Security Invariant (No Unrestricted Computer Control):
-  ✔ Security Invariant Upheld: Dangerous tool 'bash_shell_exec' is strictly forbidden: Tool violates safety invariant: unrestricted computer control and external sending are forbidden.
+================================================================================
+  DEMO 2: Idempotency Keys (D15-16)
+================================================================================
+Demonstrates: Invoking a tool with an identical idempotency key returns cached output
+and guarantees the underlying tool execution runs EXACTLY ONCE.
 
-  Checking Permission Scopes Enforcement:
-  ✖ Access Denied (Missing Scope): Permission scope violation for tool 'calculator': missing required scope(s) [math:calculate, tools:read]. Granted scopes: [text:summarize]
-  ✔ Access Granted (Valid Scopes): Caller possesses all required scopes.
+  [Call 1] Executing tool with idempotencyKey: 'academic_tax_computation_q4'...
+    Result: 810
+    Served from cache: false
+    Underlying tool executions: 1
 
-==============================================================================
-DEMO 3: Approved Plan versus Rejected Plan (D10-11, D14 Acceptance Criterion)
-Compares execution when user approves vs when user rejects — proving rejected actions NEVER execute
-==============================================================================
+  [Call 2] Executing duplicate request with same idempotencyKey: 'academic_tax_computation_q4'...
+    Result: 810
+    Served from cache: true (INSTANT HIT)
+    ✔ CRITICAL INVARIANT: Total underlying executions: 1 (ZERO DUPLICATE EXECUTION)
 
-┌────────────────────────────────────────────────────────────────────┐
-│ PART A: APPROVED PLAN — User Confirms Sensitive Action             │
-└────────────────────────────────────────────────────────────────────┘
-  [State Machine] IDLE ──(START)──▶ INITIALIZING
-  [State Machine] INITIALIZING ──(OBSERVE)──▶ OBSERVING
-  [State Machine] OBSERVING ──(OBSERVE_DONE)──▶ REASONING
-  [State Machine] REASONING ──(REASON_DONE)──▶ PLANNING
-  [State Machine] PLANNING ──(REQUIRE_APPROVAL)──▶ AWAITING_APPROVAL
+================================================================================
+  DEMO 3: Step-Level Cryptographic Audit Trail & Progress Events (D17-18)
+================================================================================
+Demonstrates: Monotonic 0-100% progress events and immutable SHA-256 hash-chained audit records.
 
-  [Safety Gate Alert] Step 'step_sensitive' requires authorization!
-  Tool: summarize_text | Risk: C_SENSITIVE
-  Target: {"text":"Confidential grade distribution data"}
-  User Action: [APPROVE] -> Submitting user confirmation...
-  [State Machine] AWAITING_APPROVAL ──(APPROVE)──▶ EXECUTING_TOOL
-  [State Machine] EXECUTING_TOOL ──(TOOL_SUCCESS)──▶ VERIFYING
-  [State Machine] VERIFYING ──(RESPOND)──▶ RESPONDING
-  [State Machine] RESPONDING ──(COMPLETE)──▶ COMPLETED
+  Listening to live progress events:
+    [░░░░░░░░░░░░░░░░░░░░]   0% | Step: step_analyze     | Workflow started
+    [░░░░░░░░░░░░░░░░░░░░]   0% | Step: step_analyze     | Executing step Analyze Dataset
+    [███████░░░░░░░░░░░░░]  33% | Step: step_analyze     | Completed step Analyze Dataset
+    [███████░░░░░░░░░░░░░]  33% | Step: step_calc_stats  | Executing step Calculate Standard Deviation
+    [█████████████░░░░░░░]  67% | Step: step_calc_stats  | Completed step Calculate Standard Deviation
+    [█████████████░░░░░░░]  67% | Step: step_report      | Executing step Format Report
+    [████████████████████] 100% | Step: step_report      | Completed step Format Report
+    [████████████████████] 100% | Step: COMPLETED        | Workflow completed successfully
 
-  Outcome: Workflow COMPLETED successfully!
+  Verifying Cryptographic Audit Trail Integrity:
+    Total Audit Records Captured: 12
+    Sample Audit Record Hash Chain:
+      Record #1 [WORKFLOW_STARTED]:
+        Previous Hash: 4ab5fb0fb40b4288f16248d5...
+        Record Hash:   6335b9ae91708f991d2a174c...
+      Record #2 [STEP_STARTED]:
+        Previous Hash: 6335b9ae91708f991d2a174c...
+        Record Hash:   d7863f56e2c3c554d83a6453...
+      Record #3 [STEP_COMPLETED]:
+        Previous Hash: d7863f56e2c3c554d83a6453...
+        Record Hash:   e37a2ae278cedd2dff290cdb...
+
+    ✔ Cryptographic Integrity Verification: PASSED (100% Tamper-Free)
+
+================================================================================
+  DEMO 4: Reasoning Proposal & Backend Approval State (D19-20)
+================================================================================
+Demonstrates: Ingesting a WorkflowProposal with a sensitive tool step and querying backend approval state.
+
+  Proposal Evaluated: ACCEPTED
+  Approval Required by Policy: YES (Risk Level C)
+
+  [Safety Gate Notification] Approval required for step 'tool_summary'
+  Querying Backend Approval State:
+    Status:        PENDING
+    Tool Name:     summarize_text
+    TTL Remaining: 300s
+  Simulating User Approval Decision from UI...
+  ✔ Approval submitted to orchestrator.
+
+  Workflow Execution Result: COMPLETED
   Final State: COMPLETED
-  Sensitive Action Executed: YES (Tool Ran)
-  Output: {
-  summary: [
-    'Sensitive analysis authorized by lead researcher.',
-    'Dataset successfully analyzed.'
-  ],
-  input: { text: 'Confidential grade distribution data' }
-}
 
-┌────────────────────────────────────────────────────────────────────┐
-│ PART B: REJECTED PLAN — User Denies Authorization                   │
-└────────────────────────────────────────────────────────────────────┘
-  [State Machine] IDLE ──(START)──▶ INITIALIZING
-  [State Machine] INITIALIZING ──(OBSERVE)──▶ OBSERVING
-  [State Machine] OBSERVING ──(OBSERVE_DONE)──▶ REASONING
-  [State Machine] REASONING ──(REASON_DONE)──▶ PLANNING
-  [State Machine] PLANNING ──(REQUIRE_APPROVAL)──▶ AWAITING_APPROVAL
+================================================================================
+  DEMO 5: Defense Against Duplicate & Expired Approvals (D19-20)
+================================================================================
+Demonstrates: Calling approve on an expired approval or duplicate approval NEVER executes a tool.
 
-  [Safety Gate Alert] Step 'step_sensitive_rejected' requires authorization!
-  Tool: summarize_text | Risk: C_SENSITIVE
-  Target: {"text":"Restricted system log audit"}
-  User Action: [REJECT] -> "Security violation: Access Denied"
-  [State Machine] AWAITING_APPROVAL ──(REJECT)──▶ RECOVERING
-  [State Machine] RECOVERING ──(FAIL)──▶ FAILED
+----------------------------------------------------------------------
+  Case 5A: Expired Approval Invariant (0 Tool Invocations)
+----------------------------------------------------------------------
+  Created approval with 25ms TTL. Waiting 40ms to expire...
+  ✔ Expiration correctly prevented approval.
+  Execution result success: false (Blocked)
+  ✔ CRITICAL INVARIANT: Sensitive tool invocations: 0 (ZERO INVOCATIONS)
 
-  Outcome: Workflow safely halted on rejection.
-  Final State: FAILED
-  CRITICAL SAFETY INVARIANT VERIFICATION: Sensitive tool was invoked: ZERO TIMES (NEVER EXECUTED)
-  Step Result in Context: None (Blocked)
+----------------------------------------------------------------------
+  Case 5B: Duplicate Approval Defense
+----------------------------------------------------------------------
+  Approving request for the first time...
+  Tool executions after first valid approval: 1
+  Submitting duplicate approval call...
+  ✔ Duplicate approval safely detected: Duplicate decision rejected.
+  ✔ CRITICAL INVARIANT: Total tool executions remain: 1 (EXACTLY ONCE, NO DUPLICATE RUNS)
 
-==============================================================================
-DEMO 4: Safe Executor — Timeouts, Bounded Idempotent Retries & Cancellation (D12-13)
-Enforces per-step timeouts, restricts retries to idempotent calls only, and supports mid-flight cancellation
-==============================================================================
-
-[Case 4A] Enforcing Hard Tool Timeout:
-  Timeout Triggered: YES (TOOL_TIMEOUT)
-  Message: Tool execution 'calculator' timed out after 50ms limit
-
-[Case 4B] Idempotent vs Non-Idempotent Retries:
-  Idempotent Tool (calculator): Succeeded on attempt 3
-  Non-Idempotent Tool (transfer_resource):
-    Retries Permitted: 0 (STRICTLY FORBIDDEN)
-    Total Invocations: 1 (Failed on first attempt without retrying)
-
-[Case 4C] Mid-flight Cancellation via AbortSignal:
-  ⚡ User clicked Cancel / issued voice stop command...
-  Execution Halted: YES (EXECUTION_CANCELLED)
-  Reason: User stopped workflow
-
-==============================================================================
-WEEK 2 LIVE DEMO COMPLETED SUCCESSFULLY
-All deliverables and acceptance criteria verified 100%
-==============================================================================
+================================================================================
+🎉 ALL WEEK 3 (W4) MILESTONES & ACCEPTANCE CRITERIA VERIFIED 100%!
+================================================================================
 ```
 
 ---
 
 ## 🔒 Security & Privacy Invariants
 
-- **No Secrets or Credentials**: Zero API keys, passwords, or tokens in source or repository history.
-- **No Personal / Recording Data**: No audio recordings, screen captures, or user identifiers.
-- **Default Mock Mode**: All tool executions remain fully simulated through safe in-memory handlers.
-- **Allow-list Only**: Only harmless, side-effect-free mock tools (`calculator`, `summarize_text`) are allowed.
-- **Forbidden Dangerous Tools**: Any unrestricted computer execution (bash, exec, shell, terminal) or external sending (email, smtp, http) is rejected deterministically.
+- **No Secrets or Credentials**: Zero API keys, passwords, or tokens in source code or repository history.
+- **No Personal Data**: Zero voice audio recordings, screen captures, or personal data.
+- **Default Mock Mode**: All tool executions remain fully simulated through safe in-memory handlers (`calculator`, `summarize_text`).
+- **No Unrestricted Computer Control**: Dangerous commands (`bash`, `shell`, `exec`, `terminal`) and external sending (`send_email`, `smtp`, `http_post_external`) are blocked deterministically.
