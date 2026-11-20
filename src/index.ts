@@ -10,3 +10,7 @@ export * from './tools/index.js';
 export * from './recovery/index.js';
 export * from './scheduler/index.js';
 export * from './workflows/index.js';
+export * from './validation/index.js';
+export * from './checkpoint/index.js';
+export * from './audit/index.js';
+export * from './reasoning/index.js';

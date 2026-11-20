@@ -1,15 +1,15 @@
 # API Specifications & Interface Contracts
 
 **Product:** AI Voice Co-Pilot  
-**Component:** Agentic Workflow & Tool Orchestration Layer  
-**Document Version:** 1.1  
+**Component:** Agentic Workflow, Validation, Tool Registry, Approvals & Safe Executor  
+**Document Version:** 2.0 (Week 2 Milestone)  
 
 ---
 
 ## 1. REST API Contracts
 
 ### 1.1 Execute Tool Action
-Requests execution of a registered tool with parameters and safety verification.
+Requests safe execution of an allow-listed tool with parameters, scopes, and approval verification.
 
 - **Endpoint:** `POST /api/v1/tools/execute`
 - **Headers:** `Content-Type: application/json`
@@ -23,7 +23,9 @@ Requests execution of a registered tool with parameters and safety verification.
   "parameters": {
     "expression": "(25 * 4) + 150"
   },
-  "risk_level": "A_INFORMATIONAL"
+  "risk_level": "A_INFORMATIONAL",
+  "granted_scopes": ["math:calculate", "tools:read"],
+  "timeout_ms": 5000
 }
 ```
 
@@ -42,12 +44,12 @@ Requests execution of a registered tool with parameters and safety verification.
 }
 ```
 
-#### Standard Error Response (`400 Bad Request` / `500 Server Error`)
+#### Blocked on Rejection / Expiration Response (`403 Forbidden`)
 ```json
 {
   "error": {
-    "code": "PARAM_VALIDATION_ERROR",
-    "message": "Validation failed for tool 'calculator': Missing required parameter 'expression'",
+    "code": "ACTION_APPROVAL_BLOCKED",
+    "message": "Action was REJECTED (User denied). Rejected actions never execute.",
     "request_id": "req_17932840002"
   }
 }
@@ -69,7 +71,7 @@ Submits a user decision for an action paused in `AWAITING_APPROVAL`.
   "step_id": "step_action",
   "approved": true,
   "decided_by": "USER",
-  "reason": "User confirmed sensitive action authorization"
+  "reason": "Authorized by user"
 }
 ```
 
@@ -88,123 +90,154 @@ Submits a user decision for an action paused in `AWAITING_APPROVAL`.
 ## 2. TypeScript Programmatic API
 
 ### 2.1 Core Schemas
-- **`WorkflowPlan`**: Formal declaration of steps, transitions, timeout, and execution bounds.
-- **`ToolSpec`**: Specification of tool properties, input schemas, risk classification, and failure policies.
-- **`WorkflowResult`**: Outcome of a completed, failed, or aborted workflow run.
-
 ```typescript
-import type { WorkflowPlan, ToolSpec, WorkflowResult } from 'voicebot-agentic-workflow';
+import type {
+  WorkflowPlan,
+  WorkflowStep,
+  WorkflowResult,
+  ToolSpec,
+  RiskLevel,
+} from 'voicebot-agentic-workflow';
 ```
 
 ---
 
-### 2.2 `StateMachine`
-Manages state machine transitions, guards, snapshot recording, and lifecycle hooks.
+### 2.2 `PlanValidator` (Week 2 Milestone D8–9)
+Validates workflow plans for dependency integrity, cycle detection, and allow-listed tools.
 
 ```typescript
-import { StateMachine, WorkflowState, WorkflowEvent } from 'voicebot-agentic-workflow';
+import { PlanValidator, ToolRegistry } from 'voicebot-agentic-workflow';
 
-const sm = new StateMachine(context, WorkflowState.IDLE);
+const registry = new ToolRegistry(true);
+const validator = new PlanValidator(registry);
 
-// Transition to next state
-await sm.transition(WorkflowEvent.START);
-
-// Lifecycle hooks
-sm.onEnter(WorkflowState.AWAITING_APPROVAL, (state, ctx) => {
-  console.log('Paused for human approval:', ctx.currentStepId);
+// Validate and inspect errors
+const result = validator.validate(workflowPlan, {
+  checkToolRegistry: true,
+  detectTransitionCycles: true,
 });
 
-// Pause / Resume
-await sm.pause();
-await sm.resume();
-
-// Snapshot inspection
-const history = sm.getHistory();
-```
-
----
-
-### 2.3 `SafetyGate`
-Enforces risk boundaries, policy permissions, and approval requirements.
-
-```typescript
-import { SafetyGate, RiskLevel } from 'voicebot-agentic-workflow';
-
-const gate = new SafetyGate({
-  autoApproveLevelA: true,
-  autoApproveLevelB: true,
-  autoApproveLevelC: false,
-});
-
-// Check requirement
-const evalResult = gate.evaluate(
-  workflowId,
-  stepId,
-  'summarize_text',
-  RiskLevel.D_HIGH_RISK_DESTRUCTIVE,
-  { text: 'Sensitive action' }
-);
-
-if (evalResult.requiresApproval) {
-  console.log(evalResult.approvalRequest?.consequencesSummary);
+if (!result.isValid) {
+  for (const err of result.errors) {
+    console.error(`[${err.code}] ${err.message}`);
+    // e.g. [DEPENDENCY_CYCLE_DETECTED] Dependency cycle detected: step_a -> step_b -> step_a
+  }
 }
 
-// Submit approval
-gate.submitDecision({
-  approvalId: evalResult.approvalRequest!.approvalId,
-  workflowId,
-  approved: true,
-  decidedBy: 'USER',
-  decidedAt: Date.now(),
-});
+// Or throw PlanValidationError immediately
+validator.validateOrThrow(workflowPlan);
 ```
 
 ---
 
-### 2.4 `MockToolExecutor`
-Executes tool requests with configurable simulated conditions for the 2 standard harmless tools (`calculator`, `summarize_text`) and custom registered `ToolSpec` definitions.
+### 2.3 `ToolRegistry` (Week 2 Milestone D8–9)
+Manages allow-lists, validates schemas, and enforces permission scopes.
 
 ```typescript
-import { MockToolExecutor, RiskLevel } from 'voicebot-agentic-workflow';
+import { ToolRegistry } from 'voicebot-agentic-workflow';
 
-const executor = new MockToolExecutor();
+const registry = new ToolRegistry(true); // Loads harmless built-ins: 'calculator', 'summarize_text'
 
-// Configure simulated behavior
-executor.configureMock('calculator', {
-  simulatedLatencyMs: 50,
-  failNTimes: 2, // Fails 2 times before succeeding
-  failureErrorCode: 'TRANSIENT_TIMEOUT',
-});
+// Allow-list checks
+registry.isAllowlisted('calculator'); // true
+registry.isAllowlisted('unlisted_tool'); // false
+registry.assertAllowlisted('calculator'); // OK
 
-// Execute tool
-const result = await executor.execute({
-  requestId: 'req_1',
-  workflowId: 'wf_1',
-  stepId: 's1',
-  toolName: 'calculator',
-  parameters: { expression: '42 * 2' },
-  riskLevel: RiskLevel.A_INFORMATIONAL,
-});
+// Permission scope checks
+registry.checkPermissionScopes('calculator', ['math:calculate', 'tools:read']); // true
+registry.checkPermissionScopes('calculator', ['*']); // true (wildcard)
+
+// Schema argument validation
+registry.validateParameters('calculator', { expression: '10 + 20' }); // OK
 ```
 
 ---
 
-### 2.5 `WorkflowOrchestrator`
+### 2.4 `ApprovalManager` & `SafetyGate` (Week 2 Milestone D10–11)
+Manages human-in-the-loop approvals with TTL, rejection, and strict non-execution invariants.
+
+```typescript
+import { ApprovalManager, SafetyGate, RiskLevel } from 'voicebot-agentic-workflow';
+
+const gate = new SafetyGate();
+const manager = gate.getApprovalManager();
+
+// 1. Create approval request with TTL
+const req = manager.createRequest({
+  workflowId: 'wf_1',
+  stepId: 'step_auth',
+  toolName: 'summarize_text',
+  riskLevel: RiskLevel.C_SENSITIVE,
+  parameters: { text: 'Classified records' },
+  ttlMs: 60000, // 60 seconds TTL
+});
+
+// 2. Approve
+manager.approve(req.approvalId, { reason: 'Lead investigator authorized' });
+
+// 3. Or Reject
+manager.reject(req.approvalId, 'Security breach suspected');
+
+// 4. Assert executable invariant: throws if REJECTED, EXPIRED, or PENDING
+manager.assertCanExecute(req.approvalId);
+```
+
+---
+
+### 2.5 `SafeExecutor` (Week 2 Milestone D12–13)
+Safe executor with per-tool timeouts, bounded retries for idempotent calls only, and cancellation.
+
+```typescript
+import { SafeExecutor, RiskLevel } from 'voicebot-agentic-workflow';
+
+const safeExecutor = new SafeExecutor();
+
+// Execute a tool safely
+const result = await safeExecutor.executeTool(
+  {
+    requestId: 'req_safe_1',
+    workflowId: 'wf_1',
+    stepId: 'step_calc',
+    toolName: 'calculator',
+    parameters: { expression: '42 * 10' },
+    riskLevel: RiskLevel.A_INFORMATIONAL,
+    timeoutMs: 5000,
+    grantedScopes: ['math:calculate', 'tools:read'],
+  },
+  {
+    isIdempotent: true, // Idempotent calls can be safely retried
+    retryPolicy: { maxAttempts: 3, backoffMs: 100, backoffMultiplier: 2 },
+  }
+);
+
+// Cancellation
+safeExecutor.cancel('req_safe_1', 'Cancelled by voice command');
+
+// Execute full plan safely with automatic plan validation
+const planResult = await safeExecutor.executePlan(workflowPlan, context);
+```
+
+---
+
+### 2.6 `WorkflowOrchestrator`
 Coordinates multi-step workflow execution across state machine, safety gates, and tools.
 
 ```typescript
-import { WorkflowOrchestrator, createCalculationAndSummaryWorkflow } from 'voicebot-agentic-workflow';
+import { WorkflowOrchestrator, MockToolExecutor } from 'voicebot-agentic-workflow';
 
-const orchestrator = new WorkflowOrchestrator(executor, safetyGate);
-const workflowPlan = createCalculationAndSummaryWorkflow();
+const executor = new MockToolExecutor();
+const orchestrator = new WorkflowOrchestrator(executor);
 
-// Handle real-time approval events
+// Handle human approval requests
 orchestrator.on('approvalRequested', (req) => {
-  // Show UI confirmation to user...
   orchestrator.submitApproval(req.stepId, true);
 });
 
+// Cancel in-flight workflow
+await orchestrator.cancel('User stopped workflow');
+
 // Execute complete workflow
-const result: WorkflowResult = await orchestrator.executeWorkflow(workflowPlan, context);
-console.log('Final outputs:', result.outputs);
+const result = await orchestrator.executeWorkflow(workflowPlan, context, {
+  validatePlan: true,
+});
 ```

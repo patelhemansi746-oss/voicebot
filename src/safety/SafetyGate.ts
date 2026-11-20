@@ -1,10 +1,12 @@
 /**
  * Safety & Human-in-the-Loop Gate
- * Enforces risk policies and approval boundaries per PRD Section 18
+ * Enforces risk policies, approval boundaries, allow-lists, and approval lifecycles per PRD Section 18
+ * Academia AI Voice Co-Pilot - SDE-8 Agentic Workflow System (Week 2)
  */
 
 import { EventEmitter } from 'node:events';
 import { RiskLevel, ApprovalRequest, ApprovalDecision, SafetyPolicy } from '../types/safety.js';
+import { ApprovalManager } from './ApprovalManager.js';
 
 export class SafetyPolicyViolationError extends Error {
   constructor(public readonly toolName: string, public readonly riskLevel: RiskLevel, message: string) {
@@ -15,10 +17,11 @@ export class SafetyPolicyViolationError extends Error {
 
 export class SafetyGate extends EventEmitter {
   private policy: SafetyPolicy;
+  private approvalManager: ApprovalManager;
   private pendingApprovals: Map<string, ApprovalRequest> = new Map();
   private approvalHistory: Map<string, ApprovalDecision> = new Map();
 
-  constructor(customPolicy?: Partial<SafetyPolicy>) {
+  constructor(customPolicy?: Partial<SafetyPolicy>, approvalManager?: ApprovalManager) {
     super();
     this.policy = {
       autoApproveLevelA: true,
@@ -29,10 +32,26 @@ export class SafetyGate extends EventEmitter {
     };
     // Force safety invariant
     this.policy.autoApproveLevelD = false;
+
+    this.approvalManager =
+      approvalManager ??
+      new ApprovalManager({
+        defaultTtlMs: this.policy.defaultApprovalTtlMs,
+      });
+
+    // Forward approval manager events
+    this.approvalManager.on('approvalCreated', (req) => this.emit('approvalCreated', req));
+    this.approvalManager.on('approvalResolved', (data) => this.emit('approvalResolved', data));
+    this.approvalManager.on('approvalRejected', (data) => this.emit('approvalRejected', data));
+    this.approvalManager.on('approvalExpired', (req) => this.emit('approvalExpired', req));
   }
 
   public getPolicy(): Readonly<SafetyPolicy> {
     return this.policy;
+  }
+
+  public getApprovalManager(): ApprovalManager {
+    return this.approvalManager;
   }
 
   public updatePolicy(updates: Partial<SafetyPolicy>): void {
@@ -41,6 +60,9 @@ export class SafetyGate extends EventEmitter {
       ...updates,
       autoApproveLevelD: false, // Invariant preserved
     };
+    if (updates.defaultApprovalTtlMs) {
+      this.approvalManager.setDefaultTtlMs(updates.defaultApprovalTtlMs);
+    }
   }
 
   /**
@@ -92,23 +114,18 @@ export class SafetyGate extends EventEmitter {
     }
 
     // Category D: High Risk / Destructive -> ALWAYS requires explicit approval
-    const approvalId = `appr_${workflowId}_${stepId}_${Date.now()}`;
-    const consequencesSummary = this.generateConsequencesSummary(toolName, riskLevel, parameters);
-
-    const approvalRequest: ApprovalRequest = {
-      approvalId,
+    const approvalRequest = this.approvalManager.createRequest({
       workflowId,
       stepId,
       toolName,
       riskLevel,
-      description: description || `Execution of tool '${toolName}' with parameters: ${JSON.stringify(parameters)}`,
+      description,
       parameters,
-      consequencesSummary,
-      createdAt: Date.now(),
+      ttlMs: this.policy.defaultApprovalTtlMs,
       requiresDoubleConfirmation: riskLevel === RiskLevel.D_HIGH_RISK_DESTRUCTIVE,
-    };
+    });
 
-    this.pendingApprovals.set(approvalId, approvalRequest);
+    this.pendingApprovals.set(approvalRequest.approvalId, approvalRequest);
     this.emit('approvalRequired', approvalRequest);
 
     return {
@@ -126,11 +143,62 @@ export class SafetyGate extends EventEmitter {
       throw new Error(`Approval request '${decision.approvalId}' not found or already resolved`);
     }
 
-    this.pendingApprovals.delete(decision.approvalId);
-    const key = this.getApprovalKey(decision.workflowId, request.stepId);
-    this.approvalHistory.set(key, decision);
+    const stepId = request.stepId;
 
-    this.emit('approvalResolved', { request, decision });
+    if (decision.approved) {
+      this.approvalManager.approve(decision.approvalId, {
+        approvedBy: decision.decidedBy,
+        reason: decision.reason,
+      });
+    } else {
+      this.approvalManager.reject(decision.approvalId, decision.reason, decision.decidedBy);
+    }
+
+    this.pendingApprovals.delete(decision.approvalId);
+    const key = this.getApprovalKey(decision.workflowId, stepId);
+    this.approvalHistory.set(key, decision);
+  }
+
+  /**
+   * Approve an approval request directly
+   */
+  public approve(approvalId: string, options?: { approvedBy?: 'USER' | 'AUTO_POLICY'; reason?: string }): ApprovalDecision {
+    const decision = this.approvalManager.approve(approvalId, options);
+    const req = this.approvalManager.getRequest(approvalId);
+    if (req) {
+      const key = this.getApprovalKey(req.workflowId, req.stepId);
+      this.approvalHistory.set(key, decision);
+      this.pendingApprovals.delete(approvalId);
+    }
+    return decision;
+  }
+
+  /**
+   * Reject an approval request directly
+   */
+  public reject(approvalId: string, reason?: string, rejectedBy: 'USER' | 'AUTO_POLICY' = 'USER'): ApprovalDecision {
+    const decision = this.approvalManager.reject(approvalId, reason, rejectedBy);
+    const req = this.approvalManager.getRequest(approvalId);
+    if (req) {
+      const key = this.getApprovalKey(req.workflowId, req.stepId);
+      this.approvalHistory.set(key, decision);
+      this.pendingApprovals.delete(approvalId);
+    }
+    return decision;
+  }
+
+  /**
+   * Check if an approval has expired
+   */
+  public isExpired(approvalId: string): boolean {
+    return this.approvalManager.isExpired(approvalId);
+  }
+
+  /**
+   * Assert that an action can execute; throws if rejected, expired, or pending
+   */
+  public assertCanExecute(approvalId: string): void {
+    this.approvalManager.assertCanExecute(approvalId);
   }
 
   /**
@@ -143,25 +211,16 @@ export class SafetyGate extends EventEmitter {
   }
 
   public getPendingApprovals(): ApprovalRequest[] {
-    return Array.from(this.pendingApprovals.values());
+    return this.approvalManager.getPendingApprovals();
   }
 
   public clearHistory(): void {
     this.pendingApprovals.clear();
     this.approvalHistory.clear();
+    this.approvalManager.clear();
   }
 
   private getApprovalKey(workflowId: string, stepId: string): string {
     return `${workflowId}:${stepId}`;
-  }
-
-  private generateConsequencesSummary(toolName: string, riskLevel: RiskLevel, params: Record<string, unknown>): string {
-    if (riskLevel === RiskLevel.D_HIGH_RISK_DESTRUCTIVE) {
-      return `CRITICAL: Action '${toolName}' will permanently delete or modify persistent resources (Target: ${JSON.stringify(params)}). This operation cannot be easily undone.`;
-    }
-    if (riskLevel === RiskLevel.C_SENSITIVE) {
-      return `WARNING: Action '${toolName}' alters system or user files/configuration. User confirmation is required before proceeding.`;
-    }
-    return `Notice: Action '${toolName}' requires authorization under current policy.`;
   }
 }

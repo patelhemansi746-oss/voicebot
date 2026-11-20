@@ -37,6 +37,16 @@ export enum RiskLevel {
 }
 
 /**
+ * Approval status lifecycle states
+ */
+export enum ApprovalStatus {
+  PENDING = 'PENDING',
+  APPROVED = 'APPROVED',
+  REJECTED = 'REJECTED',
+  EXPIRED = 'EXPIRED',
+}
+
+/**
  * Request for user approval before executing an action
  */
 export interface ApprovalRequest {
@@ -50,7 +60,12 @@ export interface ApprovalRequest {
   consequencesSummary: string;
   createdAt: number;
   expiresAt?: number;
+  ttlMs?: number;
+  status?: ApprovalStatus;
   requiresDoubleConfirmation: boolean;
+  confirmationCount?: number;
+  rejectionReason?: string;
+  decision?: ApprovalDecision;
 }
 
 /**
@@ -76,4 +91,5 @@ export interface SafetyPolicy {
   allowedToolNames?: string[];
   blockedToolNames?: string[];
   maxDailySensitiveActions?: number;
+  defaultApprovalTtlMs?: number;
 }

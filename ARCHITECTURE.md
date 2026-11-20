@@ -1,20 +1,22 @@
 # System Architecture Specification
 
 **Product:** Academia AI Voice Co-Pilot  
-**Component:** Agentic Workflow Orchestrator, State Machine & Mock Tool Executor  
-**Document Version:** 1.0  
+**Component:** Agentic Workflow Orchestrator, Validation, Tool Registry, Approvals & Safe Executor  
+**Document Version:** 2.0 (Week 2 Milestone)  
 **Target Branch:** `team/sde-8-voicebot`  
 
 ---
 
 ## 1. Architectural Principles
 
-This component implements the intelligence and execution layer of the AI Voice Co-Pilot system adhering to the following design tenets:
+This component implements the intelligence, validation, and safe execution layer of the AI Voice Co-Pilot system adhering to the following design tenets:
 1. **Deterministic State Transitions:** All workflow progression is mediated by a formal finite state machine (`StateMachine`) with explicit transition rules and guard predicates.
-2. **Controlled Tool Execution:** Tools operate through standardized parameter validation and safety gates rather than granting the LLM unrestricted operating-system access.
-3. **Safety by Design (Human-in-the-Loop):** Sensitive and destructive actions require explicit human authorization that cannot be bypassed.
-4. **Resilience & Fault Tolerance:** Automatic recovery via exponential backoff retries with jitter, fallback execution branches, and Saga pattern rollback compensations.
-5. **Observability & Auditability:** Every state transition, tool invocation, duration, and safety gate decision is recorded into an append-only audit trail.
+2. **Pre-execution Plan Validation:** Workflow dependency graphs are strictly validated before execution. Missing dependencies and cycles are detected and rejected upfront.
+3. **Controlled & Allow-listed Tool Execution:** Only allow-listed harmless tools run (`calculator`, `summarize_text`). Dangerous tools with unrestricted operating-system access or external sending are strictly forbidden.
+4. **Safety by Design & Approval Lifecycles:** Human-in-the-loop approvals (`PENDING` $\to$ `APPROVED` | `REJECTED` | `EXPIRED`) ensure that a rejected or expired action **NEVER** executes.
+5. **Safe Execution Safeguards:** Executor enforces per-step timeouts, bounded retries strictly limited to idempotent operations, and mid-flight cancellation via `AbortController`.
+6. **Fault Tolerance & Rollback:** Automatic recovery via exponential backoff with jitter for idempotent tasks, fallback routing, and Saga pattern rollback compensations.
+7. **Observability & Auditability:** Every state transition, tool invocation, duration, and safety gate decision is recorded into an append-only audit trail.
 
 ---
 
@@ -44,6 +46,8 @@ stateDiagram-v2
     IDLE --> INITIALIZING: START
     INITIALIZING --> OBSERVING: OBSERVE
     INITIALIZING --> REASONING: REASON
+    INITIALIZING --> EXECUTING_TOOL: EXECUTE_TOOL
+    INITIALIZING --> AWAITING_APPROVAL: REQUIRE_APPROVAL
     OBSERVING --> REASONING: OBSERVE_DONE
     REASONING --> PLANNING: PLAN / REASON_DONE
     REASONING --> RESPONDING: RESPOND (Direct Answer)
@@ -52,6 +56,10 @@ stateDiagram-v2
     AWAITING_APPROVAL --> EXECUTING_TOOL: APPROVE
     AWAITING_APPROVAL --> RECOVERING: REJECT
     EXECUTING_TOOL --> VERIFYING: TOOL_SUCCESS / VERIFY
+    EXECUTING_TOOL --> EXECUTING_TOOL: EXECUTE_TOOL
+    EXECUTING_TOOL --> AWAITING_APPROVAL: REQUIRE_APPROVAL
+    EXECUTING_TOOL --> RESPONDING: RESPOND
+    EXECUTING_TOOL --> COMPLETED: COMPLETE
     EXECUTING_TOOL --> RECOVERING: TOOL_FAILURE / RECOVER
     VERIFYING --> PLANNING: PLAN (Next Step)
     VERIFYING --> EXECUTING_TOOL: EXECUTE_TOOL
@@ -74,54 +82,91 @@ stateDiagram-v2
 
 ---
 
-## 3. Human-in-the-Loop Safety Gate Architecture
+## 3. Plan Validation & Cycle Detection (`PlanValidator`)
 
-The safety layer classifies actions based on potential blast radius:
+Before any workflow executes, the `PlanValidator` analyzes the static DAG structure:
 
 ```mermaid
 graph TD
-    Step[Step Requires Tool] --> SafetyGate[Safety Gate Evaluation]
-    
-    SafetyGate --> Classify{Risk Level}
-    Classify -->|Level A: Informational| AutoApprove[Auto-Approved: Direct Execution]
-    Classify -->|Level B: Low-Risk| PolicyCheck{Policy Check}
-    PolicyCheck -->|AutoApprove Enabled| AutoApprove
-    PolicyCheck -->|Policy Requires Review| PromptUser[Prompt User Approval]
-    
-    Classify -->|Level C: Sensitive| PromptUser
-    Classify -->|Level D: Destructive| DoubleConfirm[Prompt User with Double Confirmation Warning]
-    
-    DoubleConfirm --> WaitUser[Transition to AWAITING_APPROVAL]
-    PromptUser --> WaitUser
-    
-    WaitUser --> UserDecision{User Response}
-    UserDecision -->|Approved| Resume[Transition to EXECUTING_TOOL]
-    UserDecision -->|Denied| Fallback[Transition to RECOVERING / Fallback]
+    Plan[WorkflowPlan] --> Validator[PlanValidator]
+    Validator --> InitialCheck{Initial Step Exists?}
+    InitialCheck -->|No| Err1[MISSING_INITIAL_STEP]
+    InitialCheck -->|Yes| DepCheck{Dependencies Exist?}
+    DepCheck -->|No| Err2[MISSING_STEP_DEPENDENCY]
+    DepCheck -->|Yes| TransCheck{Transition Steps Exist?}
+    TransCheck -->|No| Err3[MISSING_TRANSITION_STEP]
+    TransCheck -->|Yes| CycleDFS{DFS 3-Color Cycle Detection}
+    CycleDFS -->|Cycle Found: A->B->A| Err4[DEPENDENCY_CYCLE_DETECTED]
+    CycleDFS -->|Acyclic| ToolCheck{Allow-listed Tools?}
+    ToolCheck -->|No| Err5[TOOL_NOT_ALLOWLISTED]
+    ToolCheck -->|Yes| ValidPlan[Plan Accepted for Execution]
 ```
 
-### Safety Invariants
-1. **Level D Invariant:** Category D operations can *never* be auto-approved, regardless of configuration policy.
-2. **Blocked Tools:** Tools specified in `policy.blockedToolNames` immediately throw `SafetyPolicyViolationError`.
-3. **Whitelist Mode:** When `policy.allowedToolNames` is configured, any unlisted tool is rejected immediately.
+### 3.1 Cycle Detection Algorithm
+A directed graph Depth-First Search (DFS) with 3-state coloring (`UNVISITED`, `VISITING`, `VISITED`) tracks the active recursion stack. If an edge reaches a node marked `VISITING`, a directed cycle is detected and the complete path sequence is returned (e.g. `['step_init', 'step_b', 'step_init']`).
 
 ---
 
-## 4. Fault Tolerance & Error Recovery
+## 4. Allow-Listed Tool Registry & Scope Permissions (`ToolRegistry`)
 
-### 4.1 Exponential Backoff with Jitter
-For transient errors (network timeouts, filesystem lock contention), the system calculates backoff delay using:
-$$\text{Delay} = \min\left(\text{BaseBackoff} \times \text{Multiplier}^{\text{Attempt} - 1}, \text{MaxBackoff}\right) + \text{Jitter}$$
-Where jitter is uniformly distributed between $0$ and $10\%$ of capped delay.
+```mermaid
+graph LR
+    ToolRequest[Tool Invocation Request] --> AllowCheck{Is Tool in Allow-list?}
+    AllowCheck -->|No| DenyAllow[ToolNotAllowlistedError]
+    AllowCheck -->|Yes| ForbidCheck{Is Forbidden Dangerous?}
+    ForbidCheck -->|Yes: exec/shell/email| DenyForbid[DangerousToolForbiddenError]
+    ForbidCheck -->|No| ScopeCheck{Caller Has Required Scopes?}
+    ScopeCheck -->|Missing Scopes| DenyScope[PermissionScopeError]
+    ScopeCheck -->|Valid| SchemaCheck{Validate Parameter Schema}
+    SchemaCheck -->|Type/Enum Mismatch| DenyParam[ToolParameterValidationError]
+    SchemaCheck -->|Valid| SafeExec[Proceed to Execution]
+```
 
-### 4.2 Fallback Routing
-Steps can configure fallback actions when retries fail:
-- `ALTERNATIVE_STEP`: Seamlessly diverts execution to an alternate path (e.g. cached data source).
-- `DEFAULT_OUTPUT`: Injects safe default values to preserve downstream workflow continuation.
-- `ASK_USER`: Formulates a clarification prompt to query the user for disambiguation.
+---
 
-### 4.3 Saga Pattern Rollback Compensation
-Steps that produce side effects (such as creating temporary files or staging assets) register a `CompensationAction`. If a subsequent step in the workflow suffers an unrecoverable failure:
-1. Downstream failure triggers workflow error handling.
-2. Orchestrator executes all registered compensation actions in **reverse LIFO order**.
-3. Temporary artifacts and modifications are cleanly rolled back.
-4. State machine transitions to `FAILED` with full diagnostic logs.
+## 5. Approval Gate & Lifecycle (`ApprovalManager`, `SafetyGate`)
+
+The safety layer enforces human-in-the-loop authorization with explicit TTL and execution blocks:
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: createRequest(ttlMs)
+    PENDING --> EXPIRED: Date.now() > expiresAt
+    PENDING --> REJECTED: reject(reason)
+    PENDING --> APPROVED: approve()
+    
+    state "BLOCKED: Cannot Execute (0 Tool Invocations)" as Blocked
+    EXPIRED --> Blocked
+    REJECTED --> Blocked
+    
+    state "EXECUTABLE: Tool Handler Invoked" as Executable
+    APPROVED --> Executable
+```
+
+### 5.1 Strict Non-Execution Invariant
+If an approval is `REJECTED` or `EXPIRED`:
+- The orchestrator cancels the step and transitions to `REJECT`.
+- The tool executor verifies `assertCanExecute(approvalId)` and immediately aborts.
+- **Guarantee:** Tool mock handlers are invoked **0 times**.
+
+---
+
+## 6. Safe Executor Architecture (`SafeExecutor`)
+
+```mermaid
+graph TD
+    ExecReq[Execute Tool / Plan Request] --> Guard1[Check Allow-list & Schema]
+    Guard1 --> Guard2[Check Permission Scopes]
+    Guard2 --> Guard3[Check Approval Status]
+    Guard3 --> TimeoutWrap[Wrap with Hard Timeout Timer]
+    
+    TimeoutWrap --> IdempCheck{Is Tool Idempotent?}
+    IdempCheck -->|Yes: calculator, summarize| BoundedRetry[Bounded Retries: Max 3 attempts with Backoff]
+    IdempCheck -->|No: transfer, mutate| ZeroRetry[Single Execution Attempt: 0 Retries Permitted]
+    
+    TimeoutWrap --> CancelCheck{AbortSignal Received?}
+    CancelCheck -->|Yes| Halt[Immediate Cancellation & Cleanup]
+```
+
+### 6.1 Bounded Retries for Idempotent Calls Only
+Operations with side effects must never be blindly retried upon failure. The executor inspects `tool.isIdempotent` and `step.isIdempotent`. If false, retries are skipped completely and the first failure is reported immediately or routed to fallback handlers.

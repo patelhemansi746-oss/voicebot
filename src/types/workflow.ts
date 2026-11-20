@@ -143,6 +143,10 @@ export interface WorkflowStep {
   inputMapping?: Record<string, string>; // Maps context variables to step inputs
   outputVariable?: string; // Saves step output to context.variables[outputVariable]
   metadata?: Record<string, unknown>;
+  dependencies?: string[]; // IDs of preceding steps this step depends on
+  dependsOn?: string[]; // Alias for dependencies
+  isIdempotent?: boolean; // Whether this step is safe to retry on failure
+  requiredScopes?: string[]; // Permission scopes required for this step
 }
 
 /**
